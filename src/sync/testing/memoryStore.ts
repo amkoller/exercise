@@ -1,4 +1,4 @@
-/** In-memory SyncStore for tests. Mirrors the Supabase store: upserts replace every column, reads omit providerPayload. */
+/** In-memory SyncStore for tests. Mirrors the Supabase store: upserts replace every column, reads omit providerPayload (except getActivityProviderPayload). */
 import { DEFAULT_ATHLETE_SETTINGS } from "../../data/DataLayer.js";
 import type {
   ActivityStream,
@@ -170,6 +170,16 @@ export function createMemorySyncStore(ownerUserId: string, seed: MemorySyncSeed 
     async getStream(activityId, channel) {
       const s = state.streams.get(activityId)?.find((x) => x.channel === channel);
       return s ? { ...s, values: [...s.values] } : null;
+    },
+    async listActivityIdsWithStreams(source) {
+      const ids = new Set<string>();
+      for (const [id, list] of state.streams) {
+        if (list.length > 0 && state.activities.get(id)?.source === source) ids.add(id);
+      }
+      return ids;
+    },
+    async getActivityProviderPayload(activityId) {
+      return state.activities.has(activityId) ? (state.payloads.get(activityId) ?? null) : null;
     },
     async updateActivityDerived(activityId, patch) {
       const a = state.activities.get(activityId);

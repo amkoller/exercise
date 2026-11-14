@@ -101,13 +101,13 @@ describe("createGarminClient", () => {
     expect(fake.dataCalls()).toHaveLength(2);
   });
 
-  it("downloads the FIT zip as bytes with the zip Accept header", async () => {
+  it("downloads the FIT zip as bytes with the probe's Accept header (AI-861)", async () => {
     const fake = fakeGarmin({ fit: () => new Uint8Array([0x50, 0x4b, 3, 4]) });
     const { client } = setup(fake);
     expect(Array.from(await client.activityFitZip(5))).toEqual([0x50, 0x4b, 3, 4]);
     const call = fake.dataCalls()[0]!;
     expect(call.url.pathname).toBe("/download-service/files/activity/5");
-    expect(call.headers.Accept).toBe("application/zip, application/octet-stream");
+    expect(call.headers.Accept).toBe("application/zip, application/x-zip-compressed, application/octet-stream");
   });
 
   it("calls the weight range with includeAll", async () => {

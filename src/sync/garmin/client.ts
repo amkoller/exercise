@@ -13,6 +13,9 @@ export const TOKEN_REFRESH_MARGIN_MS = 300_000;
 /** The spec's default page size for the activity search. */
 export const ACTIVITY_PAGE_SIZE = 99;
 
+/** The FIT download's Accept header, byte-identical to scripts/probes/garmin-probe.sh (AI-861). */
+export const FIT_ACCEPT = "application/zip, application/x-zip-compressed, application/octet-stream";
+
 /** The key or the token was refused. The run turns this into auth_status = "reconnect_required". */
 export class GarminAuthError extends Error {
   constructor(message: string) {
@@ -151,7 +154,7 @@ export function createGarminClient(deps: GarminClientDeps): GarminClient {
     async activityFitZip(id) {
       const res = await get(
         `/download-service/files/activity/${encodeURIComponent(String(id))}`,
-        "application/zip, application/octet-stream",
+        FIT_ACCEPT,
       );
       return new Uint8Array(await res.arrayBuffer());
     },

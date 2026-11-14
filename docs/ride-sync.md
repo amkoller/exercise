@@ -78,6 +78,26 @@ all of them. A missing variable fails the run with one error naming every missin
    npm run sync -- --source peloton --incremental --reseed-peloton-token
    ```
 
+6. **Repair Garmin rides stored without streams** (AI-861). A ride whose FIT download or decode
+   failed permanently is stored summary-only (no streams, flat TSS, no biggest climb or best
+   efforts) and the sync never fetches it again. The run's notes and `sync_state.last_error`
+   say why, one line per cause: `fit failed (http 406): <n> rides, e.g. activity <id>`
+   or `fit failed (fit: <decoder message>): ...`. Once the cause is fixed, run
+
+   ```bash
+   npm run sync -- --source garmin --refetch-streams            # add --limit 5 for a trial
+   npm run sync -- --source peloton --incremental --recompute-all
+   ```
+
+   The first command finds every Garmin ride with no `activity_streams` row, oldest first,
+   downloads its FIT again and reingests it from the stored list item, writing the streams and
+   every stream-derived column. It prints
+   `garmin refetch: candidates n, refetched n, failed n, done bool` and the failure notes. A
+   transient failure (Garmin 429 or 5xx, a network error) stops it with the count left: rerun
+   to resume. A permanent one is noted and leaves that ride as it was (a rerun tries it
+   again). The second command recomputes every ride's TSS from the new power streams and
+   rebuilds the daily load.
+
 ## Sync now and recompute from Settings
 
 `POST /api/sync` (AI-653) is the Settings screen's path into the same runner. It is
@@ -136,10 +156,24 @@ curl -s -X POST -H "Authorization: Bearer $ACCESS_TOKEN" "https://<production-ho
 
 ```text
 npm run sync -- --source garmin|peloton|all --full|--incremental [--recompute-all] [--reseed-peloton-token]
+npm run sync -- --source garmin --refetch-streams [--limit n]
 npm run sync -- --help
 ```
 
-Exactly one of `--full` and `--incremental` is required. Once a source's backfill is complete
+Exactly one of `--full`, `--incremental` and `--refetch-streams` is required.
+`--refetch-streams` (runbook step 6) takes `--source garmin` only, optionally `--limit n` (the
+oldest n candidates), and not `--recompute-all`; it holds the sync lease like every other run.
+
+**FIT failures.** A Garmin ride's FIT download or decode can fail. Garmin 429 (after the
+client's three retries), 5xx and network errors end the run with `error` set: the ride stays
+unstored and the cursor stays on its page, so the next run retries it. Any other HTTP status
+(e.g. 406, 404) and a FIT decode error store the ride summary-only, count it as skipped, and
+add one note per cause (`fit failed (<cause>): <n> rides, e.g. activity <id>`) to the CLI line,
+the cron's JSON `notes` and `sync_state.last_error`. The FIT is requested with
+`Accept: application/zip, application/x-zip-compressed, application/octet-stream`, the
+header of `scripts/probes/garmin-probe.sh`.
+
+Once a source's backfill is complete
 both modes run incrementally; `--full` on a finished source is not a re-download. The reverse
 also holds: the adapters backfill any source whose backfill is incomplete, whatever the mode,
 so a cron run before the CLI backfill finishes chips at it 50 s a day. Run the CLI first.

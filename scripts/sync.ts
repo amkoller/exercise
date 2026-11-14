@@ -1,15 +1,26 @@
 /**
- * Owner-run sync (AI-641): `npm run sync -- --source garmin|peloton|all --full|--incremental`.
+ * Owner-run sync (AI-641): `npm run sync -- --source garmin|peloton|all --full|--incremental`,
+ * or `--source garmin --refetch-streams [--limit n]` (AI-861) to repair summary-only Garmin rides.
  * Env comes from .env.local (see docs/ride-sync.md); the logic lives in src/sync/runner.ts.
  * The run (reseed, sync, recompute-all) holds the sync lease (AI-659): while the cron or a
  * Settings "Sync now" holds it, this prints `sync already running` and exits 1.
  */
-import { SYNC_USAGE, SyncUsageError, parseSyncArgs, providersOf } from "../src/sync/cli.js";
+import { SYNC_USAGE, SyncUsageError, formatRefetchResult, parseSyncArgs, providersOf } from "../src/sync/cli.js";
+import { createGarminClient, refetchStreams } from "../src/sync/garmin/index.js";
 import { SyncLockBusyError, withSyncLock } from "../src/sync/lock.js";
 import { createNodeSyncDeps, createServiceClient } from "../src/sync/nodeDeps.js";
 import { seedPelotonCredential } from "../src/sync/peloton/index.js";
 import { recomputeAll } from "../src/sync/recompute.js";
-import { SyncLoadError, SyncLockLostError, readSyncEnv, runSync, todayIn } from "../src/sync/runner.js";
+import {
+  SyncLoadError,
+  SyncLockLostError,
+  buildIngestContext,
+  deadlineSleep,
+  memoizeUntilRejected,
+  readSyncEnv,
+  runSync,
+  todayIn,
+} from "../src/sync/runner.js";
 import type { SyncRunResult } from "../src/sync/types.js";
 
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
@@ -38,6 +49,25 @@ async function main(): Promise<number> {
     if (args.reseedPelotonToken) {
       await seedPelotonCredential(deps.store, deps.box, env.PELOTON_REFRESH_TOKEN!, now);
       console.log("peloton: credential reseeded from PELOTON_REFRESH_TOKEN");
+    }
+
+    if (args.mode === "refetch-streams") {
+      // AI-861: reingest the Garmin rides stored summary-only. A lost lease reads as a deadline
+      // already past, so the run stops before its next ride.
+      const endMs = now() + SIX_HOURS_MS;
+      const deadline = () => (lost() ? -Infinity : endMs);
+      const garmin = createGarminClient({ fetch: deps.fetch, apiKey: env.GARMIN_API_KEY!, sleep: deadlineSleep(deps.sleep, deadline, now), now });
+      const r = await refetchStreams(garmin, deps.store, {
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        get deadlineMs() {
+          return deadline();
+        },
+        now,
+        ingestContext: memoizeUntilRejected(() => buildIngestContext(deps.store)),
+      });
+      formatRefetchResult(r).forEach((line) => console.log(line));
+      if (lost()) throw new SyncLockLostError([]);
+      return r.error !== null ? 1 : 0;
     }
 
     // --recompute-all rebuilds the daily load from the first ride, so the range recompute is skipped.
