@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { describe, expect, it } from "vitest";
+import { createSupabaseStub } from "../data/supabaseStub.js";
 import { PAGE_SIZE, createSupabaseSyncStore } from "./store.js";
 import { createMemorySyncStore } from "./testing/memoryStore.js";
 import type { StoredCredential } from "./types.js";
@@ -190,7 +191,80 @@ describe("createSupabaseSyncStore (h)", () => {
   });
 });
 
+describe("createSupabaseSyncStore stream candidates (AI-861, supabaseStub)", () => {
+  const tables = () => ({
+    external_activities: [
+      { id: "g1", user_id: "owner-1", source: "garmin", provider_payload: { activityId: 1 } },
+      { id: "g2", user_id: "owner-1", source: "garmin", provider_payload: { activityId: 2 } },
+      { id: "g3", user_id: "owner-1", source: "garmin", provider_payload: null },
+      { id: "p1", user_id: "owner-1", source: "peloton", provider_payload: { id: "p" } },
+      { id: "x1", user_id: "owner-2", source: "garmin", provider_payload: { activityId: 9 } },
+    ],
+    activity_streams: [
+      { id: "s1", user_id: "owner-1", activity_id: "g1", channel: "altitude" },
+      { id: "s2", user_id: "owner-1", activity_id: "g1", channel: "distance" },
+      { id: "s3", user_id: "owner-1", activity_id: "g2", channel: "power" },
+      { id: "s4", user_id: "owner-1", activity_id: "p1", channel: "power" },
+      { id: "s5", user_id: "owner-2", activity_id: "x1", channel: "power" },
+    ],
+  });
+  const foreignKeys = [{ from: "activity_streams", column: "activity_id", to: "external_activities" }];
+
+  it("listActivityIdsWithStreams pages the owner's stream rows of one source into a set", async () => {
+    const stub = createSupabaseStub({ tables: tables(), foreignKeys, maxRows: 2 });
+    const store = createSupabaseSyncStore(stub.client, "owner-1");
+    expect(await store.listActivityIdsWithStreams("garmin")).toEqual(new Set(["g1", "g2"]));
+    expect(await store.listActivityIdsWithStreams("peloton")).toEqual(new Set(["p1"]));
+    const garmin = stub.queries.slice(0, 3);
+    expect(garmin.map((q) => q.table)).toEqual(["activity_streams", "activity_streams", "activity_streams"]); // 2 + 1 + empty
+    expect(stub.filters(garmin[0]!)).toEqual([
+      ["eq", "user_id", "owner-1"],
+      ["eq", "external_activities.source", "garmin"],
+    ]);
+    // Never the stream values: they are the bulk of the table.
+    expect(String(garmin[0]!.steps[0]!.args[0])).not.toContain("values");
+  });
+
+  it("getActivityProviderPayload reads provider_payload of one owned activity", async () => {
+    const stub = createSupabaseStub({ tables: tables(), foreignKeys });
+    const store = createSupabaseSyncStore(stub.client, "owner-1");
+    expect(await store.getActivityProviderPayload("g2")).toEqual({ activityId: 2 });
+    expect(await store.getActivityProviderPayload("g3")).toBeNull();
+    expect(await store.getActivityProviderPayload("x1")).toBeNull(); // another owner's
+    expect(await store.getActivityProviderPayload("missing")).toBeNull();
+    const q = stub.queries[0]!;
+    expect(q.table).toBe("external_activities");
+    expect(q.steps[0]).toEqual({ method: "select", args: ["provider_payload"] });
+    expect(stub.filters(q)).toEqual([
+      ["eq", "user_id", "owner-1"],
+      ["eq", "id", "g2"],
+    ]);
+  });
+
+  it("surfaces a read error", async () => {
+    const stub = createSupabaseStub();
+    stub.reply({ error: { message: "boom" } }, { error: { message: "nope" } });
+    const store = createSupabaseSyncStore(stub.client, "owner-1");
+    await expect(store.listActivityIdsWithStreams("garmin")).rejects.toMatchObject({ message: "boom" });
+    await expect(store.getActivityProviderPayload("g1")).rejects.toMatchObject({ message: "nope" });
+  });
+});
+
 describe("createMemorySyncStore", () => {
+  it("listActivityIdsWithStreams and getActivityProviderPayload", async () => {
+    const store = createMemorySyncStore("owner");
+    const g = await store.upsertActivity({ source: "garmin", sourceId: "1", startedAt: "2026-06-01T10:00:00Z", sport: "cycling", environment: "outdoor", providerPayload: { a: 1 } });
+    const g2 = await store.upsertActivity({ source: "garmin", sourceId: "2", startedAt: "2026-06-02T10:00:00Z", sport: "cycling", environment: "outdoor", providerPayload: { a: 2 } });
+    const p = await store.upsertActivity({ source: "peloton", sourceId: "1", startedAt: "2026-06-01T10:00:00Z", sport: "cycling", environment: "indoor", providerPayload: { b: 1 } });
+    await store.replaceStreams(g.id, [{ channel: "power", values: [1] }]);
+    await store.replaceStreams(g2.id, []);
+    await store.replaceStreams(p.id, [{ channel: "power", values: [1] }]);
+    expect(await store.listActivityIdsWithStreams("garmin")).toEqual(new Set([g.id]));
+    expect(await store.listActivityIdsWithStreams("peloton")).toEqual(new Set([p.id]));
+    expect(await store.getActivityProviderPayload(g2.id)).toEqual({ a: 2 });
+    expect(await store.getActivityProviderPayload("missing")).toBeNull();
+  });
+
   it("saveCredential compares rotatedAt", async () => {
     const store = createMemorySyncStore("owner");
     const c = (rotatedAt: string | null): StoredCredential => ({ ciphertext: "c", iv: "i", authTag: "t", keyId: "k", accessExpiresAt: null, rotatedAt, revokedAt: null });

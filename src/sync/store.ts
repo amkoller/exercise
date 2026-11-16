@@ -56,7 +56,7 @@ export type CredentialProvider = "peloton";
 
 /**
  * Everything the sync reads and writes, scoped to one owner. Activity lists are oldest first.
- * Reads never return provider_payload.
+ * Reads never return provider_payload, except getActivityProviderPayload.
  */
 export interface SyncStore {
   readonly ownerUserId: string;
@@ -79,6 +79,13 @@ export interface SyncStore {
   /** Channels not passed are deleted. */
   replaceStreams(activityId: string, streams: ActivityStreamInput[]): Promise<void>;
   getStream(activityId: string, channel: StreamChannel): Promise<ActivityStream | null>;
+  /** Ids of the source's activities that have at least one activity_streams row (AI-861). */
+  listActivityIdsWithStreams(source: ActivitySource): Promise<Set<string>>;
+  /**
+   * The stored provider_payload of one activity; null when there is no such activity. The one
+   * read that returns it (AI-861: --refetch-streams reingests from it).
+   */
+  getActivityProviderPayload(activityId: string): Promise<unknown>;
   /** Updates only the patched columns; returns the stored row. */
   updateActivityDerived(activityId: string, patch: ActivityDerivedPatch): Promise<ExternalActivity>;
 
@@ -294,6 +301,32 @@ export function createSupabaseSyncStore(client: SupabaseClient, ownerUserId: str
         startOffsetS: Number(r.start_offset_s),
         values: (r.values as (number | null)[]) ?? [],
       }));
+    },
+    async listActivityIdsWithStreams(source) {
+      // One row per (activity, channel); the inner embed keeps the source's activities only.
+      const rows = await readPages(
+        (from, to) =>
+          client
+            .from("activity_streams")
+            .select("activity_id, external_activities!inner(source)")
+            .eq("user_id", ownerUserId)
+            .eq("external_activities.source", source)
+            .order("activity_id")
+            .order("channel")
+            .range(from, to),
+        (r) => r.activity_id as string,
+      );
+      return new Set(rows);
+    },
+    async getActivityProviderPayload(activityId) {
+      const { data, error } = await client
+        .from("external_activities")
+        .select("provider_payload")
+        .eq("user_id", ownerUserId)
+        .eq("id", activityId)
+        .maybeSingle();
+      if (error) throw error;
+      return data === null ? null : ((data as DbRow).provider_payload ?? null);
     },
     async updateActivityDerived(activityId, patch) {
       const row: DbRow = { updated_at: new Date().toISOString() };

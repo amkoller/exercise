@@ -2,6 +2,7 @@
 export {
   ACTIVITY_PAGE_SIZE,
   GARMIN_BASE_URL,
+  FIT_ACCEPT,
   GarminAuthError,
   GarminHttpError,
   createGarminClient,
@@ -11,6 +12,12 @@ export {
   type SearchActivitiesParams,
 } from "./client.js";
 export { garminToProvider, garminWeighIns } from "./normalize.js";
-export { runGarminActivities, type GarminRunOptions } from "./runActivities.js";
+export {
+  refetchStreams,
+  runGarminActivities,
+  type GarminRunOptions,
+  type RefetchStreamsOptions,
+  type RefetchStreamsResult,
+} from "./runActivities.js";
 export { EMPTY_YEARS_TO_STOP, OLDEST_YEAR, runGarminWeight } from "./runWeight.js";
 export type * from "./types.js";
