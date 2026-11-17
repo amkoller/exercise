@@ -42,8 +42,24 @@ export function readCloudRun(): CloudRun {
   return JSON.parse(readFileSync(CLOUD_RUN_FILE, "utf8")) as CloudRun;
 }
 
+/**
+ * Where `scripts/link-core-harness.mjs` linked `@starkeep/e2e-aws`, resolved
+ * once and kept in the environment. `prepare` installs Exercise with
+ * `npm ci`, which empties `node_modules` and removes the link, so `finish`
+ * (run by the reporter, in the same process) cannot look it up again.
+ */
+const E2E_AWS_DIR_ENV = "EXERCISE_E2E_AWS_DIR";
+
+function e2eAwsDir(): string {
+  const known = process.env[E2E_AWS_DIR_ENV];
+  if (known) return known;
+  const dir = realpathSync(join(APP_ROOT, "node_modules", "@starkeep", "e2e-aws"));
+  process.env[E2E_AWS_DIR_ENV] = dir;
+  return dir;
+}
+
 export async function runCloudStep(args: string[]): Promise<void> {
-  const e2eAws = realpathSync(join(APP_ROOT, "node_modules", "@starkeep", "e2e-aws"));
+  const e2eAws = e2eAwsDir();
   await new Promise<void>((done, fail) => {
     const child = spawn("pnpm", ["exec", "tsx", "src/app-cloud-run.ts", ...args], {
       cwd: e2eAws,
