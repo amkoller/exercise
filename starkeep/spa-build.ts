@@ -15,8 +15,8 @@
  * static rules (`client-routes.ts`, `staticOptions`).
  *
  * The minifier folds `isStarkeepBackend()` to a constant, so the chunk check
- * cannot look for the string `starkeep`. It looks for the Starkeep-only
- * `app_meta` table instead, which only the Starkeep DataLayer names, and for
+ * cannot look for the string `starkeep`. It looks for the row API's path
+ * prefix `/app-data/db/` instead, which only the Starkeep row client builds, and for
  * the absence of supabase-js (which lives in the lazily loaded
  * `supabaseClient-*.js` chunk).
  */
@@ -35,8 +35,8 @@ export const STARKEEP_BACKEND = "starkeep";
  */
 export const BACKEND_MARKER = ".starkeep-backend";
 
-/** A table only the Starkeep DataLayer names; see the module comment. */
-export const STARKEEP_ONLY_TABLE = "app_meta";
+/** A string only the Starkeep row client holds: the row API's path prefix. See the module comment. */
+export const STARKEEP_ONLY_MARKER = "/app-data/db/";
 
 /** A supabase-js error string; it must not be in the main chunk. */
 export const SUPABASE_JS_SIGNATURE = "supabaseUrl is required";
@@ -111,9 +111,9 @@ export function assertStarkeepMainChunk(outDir: string, base = "/"): void {
   if (code.includes(SUPABASE_JS_SIGNATURE)) {
     throw new Error(`${chunk} bundles supabase-js ("${SUPABASE_JS_SIGNATURE}"); a Starkeep build must not.`);
   }
-  if (!code.includes(STARKEEP_ONLY_TABLE)) {
+  if (!code.includes(STARKEEP_ONLY_MARKER)) {
     throw new Error(
-      `${chunk} never names the \`${STARKEEP_ONLY_TABLE}\` table, so it is not the Starkeep DataLayer ` +
+      `${chunk} never names the row API path \`${STARKEEP_ONLY_MARKER}\`, so it is not the Starkeep DataLayer ` +
         "(VITE_DATA_BACKEND was not starkeep when Vite built it).",
     );
   }

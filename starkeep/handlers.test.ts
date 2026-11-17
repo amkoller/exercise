@@ -464,7 +464,7 @@ const RIDE_JSON_COLUMNS: Record<string, string[]> = {
 async function seedRides(): Promise<void> {
   const { fixtures } = buildUuidRideFixtures(new Date());
   const s = store(null);
-  const db = createStarkeepDataLayer(s.transport, { claimSettleMs: 0 });
+  const db = createStarkeepDataLayer(s.transport);
   const key = new Map(fixtures.activities.map((a) => [a.id, externalActivityId(a.source, a.sourceId)]));
   await db.upsertExternalActivities(
     fixtures.activities.map(({ id: _id, syncedAt: _syncedAt, ...a }) => ({

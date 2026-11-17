@@ -24,7 +24,8 @@ tools pinned in `src/mcp/__fixtures__/tools-list.main.json`.
 | `starkeep/mcp.ts` | `createExerciseMcpServer(deps)`, serving the 32 tools pinned in `src/mcp/__fixtures__/tools-list.main.json`, and the stateless JSON transport per request. `deps.principal` is who the request acts for, as `verifyDelegation` returned it. |
 | `starkeep/serverTransport.ts` | `createServerTransport({ delegation? })`: server-side `Transport` to the app's tables over `signedFetch`, forwarding the delegation token when given. |
 | `starkeep/cloud/` | `npm run test:cloud`: `/mcp` on a throwaway AWS test stack. See [Cloud test](#cloud-test). |
-| `scripts/link-core-harness.mjs` | Links starkeep-core's unpublished test harnesses into `node_modules/@starkeep/` before `test:cloud`. Copied unchanged from core's example app. |
+| `starkeep/platform/` | `npm run test:platform`: the DataLayer contract on a real local data server. See [Platform test](#platform-test). |
+| `scripts/link-core-harness.mjs` | Links starkeep-core's unpublished test harnesses into `node_modules/@starkeep/` before `test:cloud` and `test:platform`. Copied unchanged from core's example app. |
 | `starkeep/serve.ts` | Local entry (`localRun`): the platform's `serveLocal`, with the build in `dist/` and the Hono app. |
 | `starkeep/handler.ts` | Cloud Lambda entry: `createWebAppHandler` + `honoUpstream`. |
 | `starkeep/client-routes.ts` | The SPA's client routes, and `staticOptions`, the static responder's options both surfaces use; `starkeep/manifest.test.ts` fails if a `<Route path>` in `src/App.tsx` is not covered. Includes `/sign-in`, where the cloud's CloudFront function sends a signed-out browser; it must stay public and served (see `docs/agents/project-memory.md`). |
@@ -41,6 +42,7 @@ npm run bundle              # dist.zip for a cloud install
 npm run typecheck           # includes tsconfig.starkeep.json
 npm test                    # includes starkeep/*.test.ts
 npm run test:cloud          # /mcp on a throwaway AWS test stack; needs a starkeep-core checkout
+npm run test:platform       # the DataLayer on a real local data server; needs a starkeep-core checkout
 ```
 
 ### `localRun`: the exact command
@@ -304,6 +306,26 @@ core's own tier-3 run proves it. After the suite, the `finish` step deletes
 the run's user and tears the stack down on a pass, and leaves everything up on
 a failure for debugging. The step's output names the teardown command.
 
+## Platform test
+
+`npm run test:platform` runs the Starkeep DataLayer's contract suite
+(`src/data/starkeep/dataLayerContract.ts`) on a real local data server.
+`npm test` runs the same suite on the in-memory fake row API
+(`src/data/starkeep.contract.test.ts`), so a test that passes on the fake but
+fails here means the fake has drifted from the data server.
+
+The harness is not published, so the script first runs
+`scripts/link-core-harness.mjs`, which finds a starkeep-core checkout through
+`STARKEEP_CORE_DIR` or beside this repository and links starkeep-core's
+tier-2 harness (`@starkeep/e2e`) into `node_modules/@starkeep/`. `npm test`
+never needs core. The global setup
+(`starkeep/platform/setup.ts`) boots a local platform from core's source in a
+throwaway state directory, never `~/.starkeep`. Each test installs Exercise's
+tables under its own app id, so every test starts with empty tables. The
+install leaves out the manifest's compute section, which the DataLayer does
+not use. Nothing
+outside this machine is touched, and CI does not run the suite.
+
 ## Table mapping
 
 Every application table from `supabase/migrations/` except the dropped ones below is declared under
@@ -323,8 +345,8 @@ or a composite key gain a text `id` (see [Ride analytics tables](#ride-analytics
 - Table `seed_claims`: Supabase per-user seeding bookkeeping. It references
   `auth.users`.
 - Table `sync_lock` and its `acquire_sync_lock` / `renew_sync_lock`
-  functions: the Vercel sync's lease row (AI-659). The Starkeep sync takes
-  its lease in `app_meta` instead (AI-822 decision 5, AI-829).
+  functions: the Vercel sync's lease row (AI-659). The Starkeep sync is to
+  take its lease in `app_meta` instead (AI-822 decision 5, AI-829).
 - RLS policies, grants, RPC functions, foreign keys, check constraints,
   unique and partial indexes, column defaults, and the `moddatetime`
   `updated_at` triggers. The manifest has none of these, so the
@@ -332,15 +354,30 @@ or a composite key gain a text `id` (see [Ride analytics tables](#ride-analytics
 
 **Starkeep-only:**
 
-- Table `app_meta`: per-install key/value bookkeeping for the DataLayer. It
-  replaces Supabase's `seed_claims`. Starkeep's insert is a last-writer-wins
-  upsert, so a duplicate key never fails and one shared row cannot pick a
-  winner. `src/data/starkeep.ts` `claimSeed()` therefore returns false if any
-  `seed_claim:*` row exists; otherwise it writes its own
-  `seed_claim:<uuid>` row (value: the ISO time), waits briefly for concurrent
-  claims to land, and seeds only if its id sorts first. The key column is
-  `id`, not `key`, because every table here keys on a text `id`
+- Table `app_meta`: per-install key/value bookkeeping, kept for the Starkeep
+  sync's lease (AI-822 decision 5, AI-829). No code reads or writes it yet.
+  Older installs hold `seed_claim:*` rows in it from the seeding this app used
+  before starter ids were fixed, and nothing reads those either. The key
+  column is `id`, not `key`, because every table here keys on a text `id`
   (`starkeep/manifest.test.ts`).
+
+**Starter rows: fixed ids instead of a seed claim.** Supabase guards
+first-use seeding with a `seed_claims` row. On Starkeep the starter
+exercises, days and day links get ids derived from their slugs in
+`src/data/seed.ts` (UUIDv5 under a namespace of Exercise's own,
+`src/data/starkeep/starterIds.ts`), and `seedStarterData` writes each with
+`ifAbsent`. Two surfaces that seed one user before they sync therefore write
+the same rows, and sync keeps one copy. A reseed leaves alone a starter row the
+user edited or deleted. The DataLayer seeds only when the user has no day of
+their own and the starter days are not all there yet, so a user seeded before
+this change, whose starter rows have random ids, is not seeded again.
+
+**Writes name one row.** The row API refuses a `PATCH` or `DELETE` whose
+`where` does not name the whole primary key as plain values. Every table here
+keys on `id`, so the DataLayer selects the ids of the rows it means to change
+and writes each by `id`. A write to a row that is not there answers 404 with
+`skipped: "missing"`, which the row client returns as a result rather than an
+error.
 
 **Soft delete: app-managed `archived_at`.** Supabase's `deleted_at` on
 `programs`, `workout_days` and `exercises` maps to a nullable `archived_at`
@@ -364,7 +401,7 @@ text, blob, timestamp, boolean`):
 
 | Postgres | Manifest | Notes |
 | --- | --- | --- |
-| `uuid` (primary key `id`) | `text`, `primaryKey: true`, `notNull: true` | The server never assigns ids. The app generates them with `crypto.randomUUID()`. Supabase's `default gen_random_uuid()` is gone. |
+| `uuid` (primary key `id`) | `text`, `primaryKey: true`, `notNull: true` | The server never assigns ids. The app generates them with `crypto.randomUUID()`, except for starter rows, whose ids are fixed (see "Starter rows" above). Supabase's `default gen_random_uuid()` is gone. |
 | `uuid` (foreign key) | `text` | No FK enforcement and no cascades. `on delete cascade` / `set null` become DataLayer logic. |
 | `timestamptz` | `timestamp` | ISO-8601 UTC with millisecond precision (`toISOString()`). `default now()` is gone, so the app must set it. |
 | `date` (`sessions.performed_on`, `daily_training_load.date`) | `text` | `YYYY-MM-DD`. `timestamp` would reject a bare date. |
@@ -418,7 +455,7 @@ text, blob, timestamp, boolean`):
 | | `set_number` | int not null | integer nn |
 | | `weight` | numeric not null | real nn |
 | | `reps` | int not null | integer nn |
-| `app_meta` (Starkeep-only) | `id` (the key, e.g. `seed_claim:<uuid>`) | (none) | text PK nn |
+| `app_meta` (Starkeep-only) | `id` (the key) | (none) | text PK nn |
 | | `value` | (none) | text |
 
 Supabase rules the DataLayer has to reproduce by hand: the partial unique

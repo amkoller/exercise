@@ -11,7 +11,7 @@ import {
   distRebuildReason,
   mainChunkPath,
   STARKEEP_BACKEND,
-  STARKEEP_ONLY_TABLE,
+  STARKEEP_ONLY_MARKER,
   SUPABASE_JS_SIGNATURE,
 } from "./spa-build.js";
 import { IMMUTABLE_ASSETS_DIR } from "./client-routes.js";
@@ -53,7 +53,7 @@ describe("buildStarkeepSpa (real vite build)", () => {
       expect(chunk.startsWith(join(outDir, IMMUTABLE_ASSETS_DIR) + "/")).toBe(true);
       const main = readFileSync(chunk, "utf8");
       expect(main).not.toContain(SUPABASE_JS_SIGNATURE);
-      expect(main).toContain(STARKEEP_ONLY_TABLE);
+      expect(main).toContain(STARKEEP_ONLY_MARKER);
       expect(readFileSync(join(outDir, BACKEND_MARKER), "utf8").trim()).toBe(STARKEEP_BACKEND);
     },
     BUILD_TIMEOUT,
@@ -75,7 +75,7 @@ describe("buildStarkeepSpa (real vite build)", () => {
       expect(chunk.startsWith(join(outDir, IMMUTABLE_ASSETS_DIR) + "/")).toBe(true);
       const main = readFileSync(chunk, "utf8");
       expect(main).not.toContain(SUPABASE_JS_SIGNATURE);
-      expect(main).toContain(STARKEEP_ONLY_TABLE);
+      expect(main).toContain(STARKEEP_ONLY_MARKER);
       expect(process.env.VITE_DATA_BACKEND).toBeUndefined();
     },
     BUILD_TIMEOUT,
