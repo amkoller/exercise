@@ -92,26 +92,24 @@ interface RuntimeConfig {
  * `/mcp` admits any loopback caller and needs no token.
  */
 function StarkeepMcp() {
-  // undefined while the runtime config loads; null when it names no gateway
-  // (the local surface, or an unreadable config).
+  // The gateway URL in the cloud; null on the local surface, whose runtime
+  // config names none; undefined while loading or when the config cannot be
+  // read, so the screen claims neither surface.
   const [gateway, setGateway] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      let url: string | null = null;
       try {
         const res = await fetch(appPath("starkeep-runtime-config"), { credentials: "same-origin" });
-        if (res.ok) {
-          const cfg = (await res.json()) as RuntimeConfig | null;
-          if (cfg && typeof cfg.apiGatewayUrl === "string" && cfg.apiGatewayUrl) {
-            url = cfg.apiGatewayUrl.replace(/\/+$/, "");
-          }
-        }
+        if (!res.ok) return;
+        const cfg = (await res.json()) as RuntimeConfig | null;
+        if (!cfg || typeof cfg !== "object") return;
+        const url = typeof cfg.apiGatewayUrl === "string" && cfg.apiGatewayUrl ? cfg.apiGatewayUrl.replace(/\/+$/, "") : null;
+        if (!cancelled) setGateway(url);
       } catch {
-        // No gateway: the screen shows the local instructions.
+        // Unreadable: leave the screen at the endpoint and the CLI command.
       }
-      if (!cancelled) setGateway(url);
     })();
     return () => {
       cancelled = true;

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { AuthProvider, useAuth } from "./AuthContext";
 import Login from "./Login";
@@ -134,6 +134,19 @@ test("MCPLogin on the local surface says no token is needed and links to no plat
 
   expect(await screen.findByText(/needs no token/i)).toBeInTheDocument();
   expect(screen.getByDisplayValue(`${window.location.origin}/mcp`)).toBeInTheDocument();
+  expect(screen.queryByRole("link")).not.toBeInTheDocument();
+});
+
+test("MCPLogin claims neither surface when the runtime config cannot be read", async () => {
+  const fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<MCPLogin />);
+
+  await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.getByDisplayValue(`${window.location.origin}/apps/exercise/mcp`)).toBeInTheDocument();
+  expect(screen.queryByText(/needs no token/i)).not.toBeInTheDocument();
   expect(screen.queryByRole("link")).not.toBeInTheDocument();
 });
 
