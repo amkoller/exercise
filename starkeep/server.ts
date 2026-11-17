@@ -2,7 +2,7 @@
  * Exercise's server half on Starkeep, as a Hono app.
  *
  * The same `app.fetch` runs on both surfaces: `serve.ts` puts it behind
- * `@hono/node-server` locally, and `handler.ts` puts it behind
+ * the platform's `serveLocal` locally, and `handler.ts` puts it behind
  * `createWebAppHandler` in the cloud. Routes are written app-relative;
  * `honoUpstream` strips the `/apps/exercise` mount before Hono routes.
  *
@@ -16,8 +16,6 @@
  *     browser app reads (authoring guide §3).
  *   - `/api/session` and `/api/session/*`: the platform session routes,
  *     mounted exactly as photos mounts them.
- *   - in local mode, an Origin and Content-Type gate in front of all of
- *     `/api/*` (`originGuard.ts`);
  *   - `/api/local-data/*`: the browser's signing proxy to the data plane,
  *     mounted exactly as photos mounts it. The browser calls
  *     `${BASE_URL}api/local-data/<data-server path>`, e.g.
@@ -40,31 +38,9 @@ import {
 import { createSessionRoutes } from "@starkeep/app-client/auth";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
 import { handleMcpRequest } from "./mcp.js";
-import { localOriginGuard } from "./originGuard.js";
-
-/**
- * The paths the server half owns; everything else belongs to the client.
- * `serve.ts` splits the local surface on this.
- */
-export function isServerPath(pathname: string): boolean {
-  return (
-    pathname === "/mcp" ||
-    pathname === "/starkeep-runtime-config" ||
-    pathname === "/api" ||
-    pathname.startsWith("/api/")
-  );
-}
 
 export function createApp(): Hono {
   const app = new Hono();
-
-  // Local mode only: refuse a foreign `Origin` (403) and a non-JSON
-  // POST/PATCH/DELETE (415) on every `/api/*` route before its handler runs,
-  // so a page on another site cannot drive the open signing proxy
-  // (`originGuard.ts`). Registered first so it precedes every route (Hono's
-  // `/api/*` also matches bare `/api`). `/mcp` is outside `/api/*` on
-  // purpose: `verifyDelegation` makes the local checks for it.
-  app.use("/api/*", localOriginGuard());
 
   // Stateless JSON-only transport: no standalone GET stream (a buffered
   // Lambda response cannot carry one) and no session to DELETE. Answered
@@ -109,7 +85,8 @@ export function createApp(): Hono {
   // reaches it, so `sessionAuth()` refuses a caller with no valid session
   // (401) before the credential is loaded. Cloud only: local mode stays open,
   // the package default, because on loopback the browser, the data and the
-  // person are on one machine. The handler reads the mode
+  // person are on one machine, and `serveLocal` (`serve.ts`) refuses a page on
+  // another site before the request gets here. The handler reads the mode
   // (`STARKEEP_APP_CLIENT_MODE`) on every request.
   const proxy = createDataProxyHandler({ appId: manifest.id, endUserAuth: sessionAuth() });
   app.all("/api/local-data/*", (c) => {

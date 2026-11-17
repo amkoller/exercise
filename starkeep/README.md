@@ -22,13 +22,12 @@ tools pinned in `src/mcp/__fixtures__/tools-list.main.json`.
 | `starkeep.manifest.json` | App id `exercise`, tier `community`, targets `local` + `cloud`, the syncable tables, the `static` compute handler. |
 | `starkeep/server.ts` | The Hono app (`app.fetch`) both surfaces run: `POST /mcp`, `GET /starkeep-runtime-config`, `/api/session[/*]`, `/api/local-data/*`. |
 | `starkeep/mcp.ts` | `createExerciseMcpServer(deps)`, serving the 32 tools pinned in `src/mcp/__fixtures__/tools-list.main.json`, and the stateless JSON transport per request. `deps.principal` is who the request acts for, as `verifyDelegation` returned it. |
-| `starkeep/originGuard.ts` | Local-mode gate on `/api/*`: 403 for a non-loopback `Origin`, 415 for a non-JSON `POST`/`PATCH`/`DELETE`. |
 | `starkeep/serverTransport.ts` | `createServerTransport({ delegation? })`: server-side `Transport` to the app's tables over `signedFetch`, forwarding the delegation token when given. |
 | `starkeep/cloud/` | `npm run test:cloud`: `/mcp` on a throwaway AWS test stack. See [Cloud test](#cloud-test). |
 | `scripts/link-core-harness.mjs` | Links starkeep-core's unpublished test harnesses into `node_modules/@starkeep/` before `test:cloud`. Copied unchanged from core's example app. |
-| `starkeep/serve.ts` | Local entry (`localRun`): Node server on loopback, Hono for server paths, `dist/` for the rest. |
+| `starkeep/serve.ts` | Local entry (`localRun`): the platform's `serveLocal`, with the build in `dist/` and the Hono app. |
 | `starkeep/handler.ts` | Cloud Lambda entry: `createWebAppHandler` + `honoUpstream`. |
-| `starkeep/client-routes.ts` | The SPA's client routes, used as cloud `shellPaths`; `starkeep/manifest.test.ts` fails if a `<Route path>` in `src/App.tsx` is not covered. Includes `/sign-in`, where the cloud's CloudFront function sends a signed-out browser; it must stay public and served (see `docs/agents/project-memory.md`). |
+| `starkeep/client-routes.ts` | The SPA's client routes, and `staticOptions`, the static responder's options both surfaces use; `starkeep/manifest.test.ts` fails if a `<Route path>` in `src/App.tsx` is not covered. Includes `/sign-in`, where the cloud's CloudFront function sends a signed-out browser; it must stay public and served (see `docs/agents/project-memory.md`). |
 | `starkeep/build-bundle.ts` | `npm run bundle` / `pnpm bundle`: writes `dist.zip`. |
 | `starkeep/spa-build.ts` | The Starkeep `vite build` both of the above use: forces `VITE_DATA_BACKEND=starkeep`, checks the main chunk, and decides when the local `dist/` needs a rebuild. |
 | `starkeep/validate-manifest.ts` | `npm run starkeep:validate`. |
@@ -37,7 +36,7 @@ tools pinned in `src/mcp/__fixtures__/tools-list.main.json`.
 
 ```bash
 npm run starkeep:validate   # validateManifest() from @starkeep/admin-manifest; non-zero exit on error
-npm run starkeep:serve -- -p 5199   # local server on 127.0.0.1:5199 (what admin-web runs)
+npm run starkeep:serve -- --port 5199   # local server on 127.0.0.1:5199 (what admin-web runs)
 npm run bundle              # dist.zip for a cloud install
 npm run typecheck           # includes tsconfig.starkeep.json
 npm test                    # includes starkeep/*.test.ts
@@ -49,26 +48,22 @@ npm run test:cloud          # /mcp on a throwaway AWS test stack; needs a starke
 The manifest declares:
 
 ```json
-"localRun": { "command": "npm", "args": ["run", "starkeep:serve", "--"], "portFlag": "-p" }
+"localRun": { "command": "npm", "args": ["run", "starkeep:serve", "--"], "portFlag": "--port" }
 ```
 
-admin-web picks a free port and appends `-p <port>`, so it runs:
+admin-web picks a free port and appends `--port <port>`, so it runs:
 
 ```bash
-npm run starkeep:serve -- -p <port>
-# → tsx starkeep/serve.ts -p <port>
+npm run starkeep:serve -- --port <port>
+# → tsx starkeep/serve.ts --port <port>
 ```
 
-`--port <n>` works too, and so does `PORT=<n>` when no flag is passed. The
-server binds `127.0.0.1` only and returns 403 for a `Host` header that is not
-loopback, as photos does. Every `/api/*` request carrying an `Origin` header
-that is not `http://127.0.0.1`, `http://localhost` or `http://[::1]` on the
-server's own port gets 403 `{ "error": "forbidden_origin" }` before any
-handler runs (`starkeep/originGuard.ts`); `/mcp`, which has its own bearer
-token, is exempt. A `POST`, `PUT`, `PATCH` or `DELETE` under `/api/*` whose
-`Content-Type` is not `application/json` gets 415, so the "simple" cross-site
-requests a hostile page can send without a CORS preflight never reach the
-signing proxy (cloud mode skips both checks).
+`PORT=<n>` works when no flag is passed. The server is the platform's
+`serveLocal` from `@starkeep/app-client/local`. It binds `127.0.0.1` only, and
+before any route runs it answers 403 to a request whose `Host` is not loopback
+and to a request a page on another site sent (by `Sec-Fetch-Site`, or by a
+foreign `Origin` on a write from a browser that sends no `Sec-Fetch-Site`). A
+hostile page therefore cannot reach the signing proxy or the token routes.
 
 If `dist/` is missing, older than `src/`, `index.html`, `vite.config.ts` or
 `package.json`, or not a Starkeep build, the server runs `vite build` before it
@@ -77,9 +72,16 @@ repo has no `.env`, and an unset value means the mock backend) and writes
 `dist/.starkeep-backend`. A `dist/` without that marker, such as one from a
 plain `npm run build` for Vercel, is rebuilt on the next start even when it is
 newer than the sources. Both builds fail if the main chunk bundles supabase-js
-or lacks the Starkeep DataLayer (`starkeep/spa-build.ts`). `GET /` serves `dist/index.html`. Any path that is not a
-server path and not a file in `dist/` also gets `index.html`, the same
-fallback `vercel.json` gives.
+or lacks the Starkeep DataLayer (`starkeep/spa-build.ts`). Both builds put
+their content-hashed files under `_immutable/`, and a local `dist/` from before
+that layout is rebuilt too.
+
+The server answers the build's files with the static responder the cloud
+Lambda runs, over the same paths (`staticOptions` in
+`starkeep/client-routes.ts`). `GET /` and every client route serve
+`dist/index.html`, files under `/_immutable/` are cached as immutable, and a
+missing file under `/_immutable/` gets 404. Every other path goes to the Hono
+app, which answers 404 for a path it has no route for.
 
 ### `bundle`: the cloud contract
 
@@ -137,7 +139,7 @@ The script runs `vite build` with `VITE_DATA_BACKEND=starkeep` into a staging
    ```
 
 You can also run the server without admin-web:
-`npm run starkeep:serve -- -p 5199`. The tools need the app credential in
+`npm run starkeep:serve -- --port 5199`. The tools need the app credential in
 `~/.starkeep/app-creds/exercise.json` and a running data server.
 
 ## Environment variables

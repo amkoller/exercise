@@ -8,7 +8,7 @@
   "localRun": {
     "command": "npm",
     "args": ["run", "starkeep:serve", "--"],
-    "portFlag": "-p"
+    "portFlag": "--port"
   },
   "infraRequirements": {
     "appSpecificSyncable": {
