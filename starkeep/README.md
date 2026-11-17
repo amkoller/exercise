@@ -146,7 +146,7 @@ You can also run the server without admin-web:
 
 | Variable | Surface | Set by | Used for |
 | --- | --- | --- | --- |
-| `PORT` | local | person running by hand | Fallback when no `-p`/`--port` is passed. |
+| `PORT` | local | person running by hand | Fallback when no `--port` is passed. |
 | `STARKEEP_DIR` | local | admin-web's env | Root of Starkeep state (default `~/.starkeep`); credentials live in `app-creds/` under it. |
 | `STARKEEP_APP_BASE_PATH` | bundle + cloud | installer / Lambda env | Mount prefix `/apps/exercise`: Vite `base` at bundle time, and the web adapter's `basePath` at runtime. |
 | `STARKEEP_BUNDLE_OUT` | bundle | installer | Where `dist.zip` is written. |
