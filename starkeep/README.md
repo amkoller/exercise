@@ -150,7 +150,7 @@ You can also run the server without admin-web:
 | `STARKEEP_BUNDLE_OUT` | bundle | installer | Where `dist.zip` is written. |
 | `VITE_DATA_BACKEND` | local + bundle | `starkeep/spa-build.ts` | Always `starkeep` in both Starkeep builds, whatever the shell says; nothing to set. |
 | `STARKEEP_APP_CLIENT_MODE` | cloud | Pulumi program (`"cloud"`) | Switches `@starkeep/app-client` to cloud mode (HMAC secret from SSM, calls via the shared API Gateway). |
-| `STARKEEP_CLOUD_DATA_BASE` | cloud | Pulumi program | API Gateway base for server-to-server signed calls. |
+| `STARKEEP_CLOUD_DATA_BASE` | cloud | Pulumi program | API Gateway base for server-to-server signed calls; `GET /starkeep-runtime-config` also builds the consent pages' addresses from it. |
 | `STARKEEP_APP_CREDS_PARAMETER_NAME` | cloud | Pulumi program | SSM parameter holding the app's HMAC secret: `/<stackPrefix>/app-creds/exercise`. |
 | `STARKEEP_STACK_PREFIX` | cloud | Pulumi program | Deployment stack prefix. |
 | `STARKEEP_API_GATEWAY_URL`, `STARKEEP_USER_POOL_ID`, `STARKEEP_USER_POOL_CLIENT_ID`, `STARKEEP_IDENTITY_POOL_ID` | cloud | installer fills the empty placeholders in the manifest `env` | `GET /starkeep-runtime-config` and the session routes. |
@@ -234,13 +234,15 @@ An MCP client acts for the user with a platform delegation token, sent as
   header. The client gets the gateway's 401, finds the route's protected
   resource metadata at its well-known location, and sends the user to the
   platform to sign in and approve `read` or `readwrite` access.
-- **Pasted token.** The user creates a token at
-  `<gateway URL>/connect?app=exercise` and passes it to the client as the
-  `Authorization` header.
+- **Pasted token.** The user creates a token on the platform's connect page
+  and passes it to the client as the `Authorization` header.
 
-The user lists and revokes both kinds at `<gateway URL>/connections`. The
-MCP screen (`/mcp-login`) shows the endpoint and links to both pages. It
-reads the gateway URL from `GET /starkeep-runtime-config`.
+The user lists and revokes both kinds on the platform's connections page.
+The MCP screen (`/mcp-login`) shows the endpoint and links to both pages.
+The screen reads the pages' addresses from the `connectUrl` and
+`connectionsUrl` fields of `GET /starkeep-runtime-config`. Both pages answer
+on the gateway's execute-api host, never on the CloudFront address in
+`apiGatewayUrl`. The local runtime config names neither page.
 
 **Cloud.** The gateway refuses a request without a valid delegation token
 before the app runs. The handler calls `verifyDelegation` again, because it

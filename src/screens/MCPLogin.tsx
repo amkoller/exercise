@@ -80,22 +80,29 @@ export default function MCPLogin() {
 
 /** The parts of the runtime config the Starkeep screen reads. */
 interface RuntimeConfig {
-  apiGatewayUrl?: string;
+  connectUrl?: string;
+  connectionsUrl?: string;
+}
+
+/** The platform's consent pages, as the runtime config names them. */
+interface PlatformPages {
+  connectUrl: string;
+  connectionsUrl: string;
 }
 
 /**
  * Starkeep: the platform owns access for outside clients. In the cloud, an
  * MCP client signs in with OAuth on the platform, or the user creates a
- * delegation token on the platform's `/connect` page and pastes it into the
- * client; the user lists and revokes both kinds on `/connections`. Both pages
- * live on the gateway's hostname, which the runtime config names. Locally,
+ * delegation token on the platform's connect page and pastes it into the
+ * client; the user lists and revokes both kinds on the connections page. The
+ * runtime config names both pages in the cloud and neither locally. Locally,
  * `/mcp` admits any loopback caller and needs no token.
  */
 function StarkeepMcp() {
-  // The gateway URL in the cloud; null on the local surface, whose runtime
-  // config names none; undefined while loading or when the config cannot be
-  // read, so the screen claims neither surface.
-  const [gateway, setGateway] = useState<string | null | undefined>(undefined);
+  // The platform's pages in the cloud; null on the local surface, whose
+  // runtime config names none; undefined while loading or when the config
+  // cannot be read, so the screen claims neither surface.
+  const [pages, setPages] = useState<PlatformPages | null | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,8 +112,12 @@ function StarkeepMcp() {
         if (!res.ok) return;
         const cfg = (await res.json()) as RuntimeConfig | null;
         if (!cfg || typeof cfg !== "object") return;
-        const url = typeof cfg.apiGatewayUrl === "string" && cfg.apiGatewayUrl ? cfg.apiGatewayUrl.replace(/\/+$/, "") : null;
-        if (!cancelled) setGateway(url);
+        const { connectUrl, connectionsUrl } = cfg;
+        const found =
+          typeof connectUrl === "string" && connectUrl && typeof connectionsUrl === "string" && connectionsUrl
+            ? { connectUrl, connectionsUrl }
+            : null;
+        if (!cancelled) setPages(found);
       } catch {
         // Unreadable: leave the screen at the endpoint and the CLI command.
       }
@@ -125,7 +136,7 @@ function StarkeepMcp() {
       <h1 className="text-xl font-bold">Connect an MCP client</h1>
       <ReadOnlyField id="mcp-endpoint" label="MCP endpoint URL" value={endpointUrl} />
       <ReadOnlyField id="mcp-cli-snippet" label="Claude Code CLI" value={cliSnippet} rows={2} />
-      {gateway === undefined ? null : gateway === null ? (
+      {pages === undefined ? null : pages === null ? (
         <p className="text-sm text-gray-600">
           On this computer the endpoint needs no token: it answers only local programs.
         </p>
@@ -137,7 +148,7 @@ function StarkeepMcp() {
           <div className="space-y-1 border-t pt-4">
             <p className="text-sm font-semibold">Clients without sign-in</p>
             <p className="text-sm text-gray-600">
-              <a className="underline" href={`${gateway}/connect?app=exercise`}>
+              <a className="underline" href={pages.connectUrl}>
                 Create a token
               </a>{" "}
               for Exercise, then pass it as a header.
@@ -145,7 +156,7 @@ function StarkeepMcp() {
             <ReadOnlyField id="mcp-token-snippet" label="Claude Code CLI with a token" value={tokenSnippet} rows={2} />
           </div>
           <p className="border-t pt-4 text-sm text-gray-600">
-            <a className="underline" href={`${gateway}/connections`}>
+            <a className="underline" href={pages.connectionsUrl}>
               Manage connections
             </a>{" "}
             to see which clients can reach your data and revoke them.

@@ -94,12 +94,24 @@ test("Login renders the Starkeep sign-in action and no email form", () => {
   expect(screen.queryByRole("button", { name: /magic link/i })).not.toBeInTheDocument();
 });
 
-const GATEWAY = "https://gw.example.com";
+// The shape a cloud deployment serves: the browser-facing base is the
+// CloudFront distribution, and the consent pages answer on the gateway's own
+// execute-api host, under the stage.
+const GATEWAY = "https://abc123.execute-api.us-east-1.amazonaws.com/prod";
+const CLOUD_RUNTIME_CONFIG = {
+  apiGatewayUrl: "https://d111111abcdef8.cloudfront.net",
+  region: "us-east-1",
+  userPoolId: "us-east-1_abc",
+  userPoolClientId: "client123",
+  identityPoolId: "us-east-1:pool",
+  connectUrl: `${GATEWAY}/connect?app=exercise`,
+  connectionsUrl: `${GATEWAY}/connections`,
+};
 
 test("MCPLogin in the cloud shows the endpoint and the platform's connect and connections pages", async () => {
   const fetchMock = vi.fn(async (url: string) => {
     if (url === "/apps/exercise/starkeep-runtime-config") {
-      return { ok: true, json: async () => ({ apiGatewayUrl: `${GATEWAY}/`, userPoolId: "us-east-1_abc" }) };
+      return { ok: true, json: async () => CLOUD_RUNTIME_CONFIG };
     }
     return { ok: false, status: 404, json: async () => ({}) };
   });
@@ -151,7 +163,7 @@ test("MCPLogin claims neither surface when the runtime config cannot be read", a
 });
 
 test("nothing on the Starkeep path imports @supabase/supabase-js", async () => {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ signedIn: true, apiGatewayUrl: GATEWAY }) }));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ signedIn: true, ...CLOUD_RUNTIME_CONFIG }) }));
 
   render(
     <AuthProvider>
