@@ -39,16 +39,8 @@ import {
 } from "@starkeep/app-client";
 import { createSessionRoutes } from "@starkeep/app-client/auth";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
-import { handleMcpRequest, type ExerciseMcpDeps } from "./mcp.js";
+import { handleMcpRequest } from "./mcp.js";
 import { localOriginGuard } from "./originGuard.js";
-
-export interface ExerciseAppOptions {
-  /**
-   * Answers an admitted MCP request. Defaults to {@link handleMcpRequest};
-   * tests pass a spy to see the principal `verifyDelegation` returned.
-   */
-  mcpHandler?: (request: Request, deps: ExerciseMcpDeps) => Promise<Response>;
-}
 
 /**
  * The paths the server half owns; everything else belongs to the client.
@@ -63,9 +55,8 @@ export function isServerPath(pathname: string): boolean {
   );
 }
 
-export function createApp(opts: ExerciseAppOptions = {}): Hono {
+export function createApp(): Hono {
   const app = new Hono();
-  const mcpHandler = opts.mcpHandler ?? handleMcpRequest;
 
   // Local mode only: refuse a foreign `Origin` (403) and a non-JSON
   // POST/PATCH/DELETE (415) on every `/api/*` route before its handler runs,
@@ -92,7 +83,7 @@ export function createApp(opts: ExerciseAppOptions = {}): Hono {
   app.post("/mcp", async (c) => {
     const principal = await verifyDelegation(c.req.raw);
     if (!principal) return delegationRefusal(c.req.raw);
-    return mcpHandler(c.req.raw, { principal });
+    return handleMcpRequest(c.req.raw, { principal });
   });
 
   const runtimeConfig = createRuntimeConfigHandler();
