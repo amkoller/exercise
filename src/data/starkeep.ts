@@ -169,7 +169,6 @@ export function createStarkeepDataLayer(transport: Transport): DataLayer {
 }
 
 export function createStarkeepDataLayerFromRows(rows: RowClient): DataLayer {
-
   async function first<R extends Row>(table: string, where: Where, order: string[] = []): Promise<R | null> {
     const { rows: found } = await rows.select<R>(table, { where, order, limit: 1 });
     return found[0] ?? null;
