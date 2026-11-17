@@ -3,17 +3,17 @@
  * The local Origin and Content-Type gate in front of `/api/*` (AI-606).
  *
  * Real: the Hono app, the guard, the data proxy and `sessionAuth()` (local
- * default: open), the MCP token gate. Stubbed: the data server (global
- * `fetch`: a {@link FakeDataPlane} for `mcp_tokens`, a canned page for
- * `programs`) and `loadAppCredentials` for the MCP gate; the proxy reads its
- * credential from a temp `STARKEEP_DIR`.
+ * default: open), the local `verifyDelegation` check on `/mcp`. Stubbed: the
+ * data server (global `fetch`: a canned page for `programs`) and
+ * `loadAppCredentials` for the MCP route; the proxy reads its credential from
+ * a temp `STARKEEP_DIR`.
  */
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as appClient from "@starkeep/app-client";
-import { FakeDataPlane, INITIALIZE, mcpHeaders, TEST_CREDS } from "./test-support.js";
+import { INITIALIZE, mcpHeaders, TEST_CREDS } from "./test-support.js";
 
 vi.mock("@starkeep/app-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@starkeep/app-client")>();
@@ -21,22 +21,22 @@ vi.mock("@starkeep/app-client", async (importOriginal) => {
 });
 
 const { createApp } = await import("./server.js");
-const { resetMcpAuthCaches } = await import("./mcp-auth.js");
 const { isLoopbackOrigin } = await import("./originGuard.js");
 
 const PORT = 5199;
 const BASE = `http://127.0.0.1:${PORT}`;
 const PROGRAMS = `${BASE}/api/local-data/app-data/db/programs`;
-const MCP_LOGIN = `${BASE}/api/mcp-login`;
+const SESSION = `${BASE}/api/session`;
 const EVIL = "https://evil.example";
 const ENV_KEYS = ["STARKEEP_APP_CLIENT_MODE", "STARKEEP_DIR"] as const;
 const JSON_TYPE = { "content-type": "application/json" };
 
 let savedEnv: Record<string, string | undefined>;
 let starkeepDir: string;
-let plane: FakeDataPlane;
 /** Requests that reached the data server's `programs` table. */
 let programsHits: number;
+/** Requests that reached the data server anywhere else. */
+let otherHits: number;
 let app: ReturnType<typeof createApp>;
 
 beforeEach(() => {
@@ -47,16 +47,13 @@ beforeEach(() => {
   process.env.STARKEEP_DIR = starkeepDir;
   delete process.env.STARKEEP_APP_CLIENT_MODE;
   appClient.clearAppCredentialsCache();
-  resetMcpAuthCaches();
-  plane = new FakeDataPlane();
   programsHits = 0;
-  vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+  otherHits = 0;
+  vi.stubGlobal("fetch", async (input: string | URL | Request) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    if (url.pathname.startsWith("/app-data/db/programs")) {
-      programsHits += 1;
-      return Response.json({ rows: [], truncated: false, page_token: null });
-    }
-    return plane.fetch(input, init);
+    if (url.pathname.startsWith("/app-data/db/programs")) programsHits += 1;
+    else otherHits += 1;
+    return Response.json({ rows: [], truncated: false, page_token: null });
   });
   app = createApp();
 });
@@ -72,7 +69,7 @@ afterEach(() => {
 });
 
 describe("local mode: Origin gate on /api/*", () => {
-  it.each([PROGRAMS, MCP_LOGIN, `${BASE}/api/mcp-sessions`, `${BASE}/api/session`, `${BASE}/api/session/refresh`])(
+  it.each([PROGRAMS, SESSION, `${BASE}/api/session/refresh`])(
     "Origin: https://evil.example → 403 forbidden_origin on %s",
     async (url) => {
       for (const method of ["GET", "POST"]) {
@@ -85,7 +82,7 @@ describe("local mode: Origin gate on /api/*", () => {
         expect(await res.json()).toEqual({ error: "forbidden_origin" });
       }
       expect(programsHits).toBe(0);
-      expect(plane.requests).toEqual([]);
+      expect(otherHits).toBe(0);
     },
   );
 
@@ -118,26 +115,11 @@ describe("local mode: Origin gate on /api/*", () => {
     },
   );
 
-  it("loopback Origin → /api/mcp-login reaches its handler", async () => {
-    // The handler's own 405 proves it ran; the guard answers 403/415 only.
-    const res = await app.request(MCP_LOGIN, { headers: { origin: `http://localhost:${PORT}` } });
-    expect(res.status).toBe(405);
-    expect(await res.json()).toEqual({ error: "Method not allowed" });
-
-    const ok = await app.request(MCP_LOGIN, {
-      method: "POST",
-      headers: { origin: `http://127.0.0.1:${PORT}`, ...JSON_TYPE },
-      body: "{}",
-    });
-    expect(ok.status).toBe(200);
-    expect(await ok.json()).toHaveProperty("token");
-  });
-
   it("no Origin → passes (curl, same-origin navigation)", async () => {
     expect((await app.request(PROGRAMS)).status).toBe(200);
-    const login = await app.request(MCP_LOGIN, { method: "POST", headers: JSON_TYPE, body: "{}" });
-    expect(login.status).toBe(200);
-    expect(programsHits).toBe(1);
+    const post = await app.request(PROGRAMS, { method: "POST", headers: JSON_TYPE, body: JSON.stringify({ row: { id: "p1" } }) });
+    expect(post.status).toBe(200);
+    expect(programsHits).toBe(2);
   });
 
   it("the port compared is the one the request reached", () => {
@@ -199,25 +181,24 @@ describe("local mode: Content-Type gate on /api/*", () => {
 });
 
 describe("/mcp is outside the gate", () => {
-  it("POST /mcp with Origin: https://anything and a valid token → reaches auth and succeeds", async () => {
-    const { token } = plane.seed();
+  it("POST /mcp from a local client that sends no Origin → admitted without a token", async () => {
     const res = await app.request(`${BASE}/mcp`, {
       method: "POST",
-      headers: { ...mcpHeaders(token), origin: "https://anything.example" },
+      headers: mcpHeaders(),
       body: JSON.stringify(INITIALIZE),
     });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { result?: unknown }).result).toBeDefined();
   });
 
-  it("POST /mcp with a foreign Origin and no token → 401 from the token gate, not 403", async () => {
+  it("POST /mcp with a foreign Origin → 401 from verifyDelegation, not the guard's 403", async () => {
     const res = await app.request(`${BASE}/mcp`, {
       method: "POST",
-      headers: { ...mcpHeaders(), origin: EVIL, "content-type": "text/plain" },
+      headers: { ...mcpHeaders(), host: `127.0.0.1:${PORT}`, origin: EVIL, "content-type": "text/plain" },
       body: JSON.stringify(INITIALIZE),
     });
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "unauthorized" });
+    expect(res.headers.get("www-authenticate")).toMatch(/^Bearer /);
   });
 });
 
@@ -236,9 +217,10 @@ describe("cloud mode: the guard is a no-op", () => {
     expect(proxied.status).toBe(401);
     expect(await proxied.json()).toEqual({ error: "Not authenticated" });
 
-    // mcp-login's own handler answers (405 for GET), not the guard's 403.
-    const login = await app.request(MCP_LOGIN, { headers: { origin: EVIL } });
-    expect(login.status).toBe(405);
+    // The session probe's own answer (signed out), not the guard's 403.
+    const session = await app.request(SESSION, { headers: { origin: EVIL } });
+    expect(session.status).toBe(200);
+    expect(await session.json()).toMatchObject({ signedIn: false });
     expect(programsHits).toBe(0);
   });
 });

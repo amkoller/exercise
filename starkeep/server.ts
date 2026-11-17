@@ -7,12 +7,11 @@
  * `honoUpstream` strips the `/apps/exercise` mount before Hono routes.
  *
  * What lives here:
- *   - `POST /mcp`: the MCP endpoint, gated by a per-user sealed bearer token
- *     (`mcp-auth.ts`). Any other method answers 405, as `api/mcp.ts` does for GET.
- *   - `POST /api/mcp-login` and `GET`/`POST`/`DELETE /api/mcp-sessions`: mint,
- *     list and revoke those tokens from the browser session (`mcp-login.ts`,
- *     `mcp-sessions.ts`), with the JSON contract of `api/mcp-login.ts` and
- *     `api/mcp-sessions.ts`.
+ *   - `POST /mcp`: the MCP endpoint, a delegated route. In the cloud the
+ *     caller is an outside client holding a platform delegation token (from
+ *     OAuth sign-in or the platform's `/connect` page); locally it is any
+ *     loopback caller. Any other method answers 405, as `api/mcp.ts` does
+ *     for GET.
  *   - `GET /starkeep-runtime-config`: the runtime config every Starkeep
  *     browser app reads (authoring guide §3).
  *   - `/api/session` and `/api/session/*`: the platform session routes,
@@ -34,20 +33,19 @@ import { Hono } from "hono";
 import {
   createDataProxyHandler,
   createRuntimeConfigHandler,
+  delegationRefusal,
   sessionAuth,
+  verifyDelegation,
 } from "@starkeep/app-client";
 import { createSessionRoutes } from "@starkeep/app-client/auth";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
-import { authenticateMcpRequest } from "./mcp-auth.js";
-import { handleMcpLogin } from "./mcp-login.js";
-import { handleMcpSessions } from "./mcp-sessions.js";
 import { handleMcpRequest, type ExerciseMcpDeps } from "./mcp.js";
 import { localOriginGuard } from "./originGuard.js";
 
 export interface ExerciseAppOptions {
   /**
-   * Answers an authenticated MCP request. Defaults to {@link handleMcpRequest};
-   * tests pass a spy to see the context the auth layer resolved.
+   * Answers an admitted MCP request. Defaults to {@link handleMcpRequest};
+   * tests pass a spy to see the principal `verifyDelegation` returned.
    */
   mcpHandler?: (request: Request, deps: ExerciseMcpDeps) => Promise<Response>;
 }
@@ -73,27 +71,29 @@ export function createApp(opts: ExerciseAppOptions = {}): Hono {
   // POST/PATCH/DELETE (415) on every `/api/*` route before its handler runs,
   // so a page on another site cannot drive the open signing proxy
   // (`originGuard.ts`). Registered first so it precedes every route (Hono's
-  // `/api/*` also matches bare `/api`). `/mcp`
-  // is outside `/api/*` on purpose: it has its own bearer-token gate.
+  // `/api/*` also matches bare `/api`). `/mcp` is outside `/api/*` on
+  // purpose: `verifyDelegation` makes the local checks for it.
   app.use("/api/*", localOriginGuard());
 
   // Stateless JSON-only transport: no standalone GET stream (a buffered
   // Lambda response cannot carry one) and no session to DELETE. Answered
-  // before the token check, as `api/mcp.ts` does, since it reveals nothing.
+  // before the delegation check, as `api/mcp.ts` does, since it reveals
+  // nothing.
   app.on(["GET", "PUT", "PATCH", "DELETE", "OPTIONS"], "/mcp", () =>
     Response.json({ error: "method_not_allowed" }, { status: 405, headers: { Allow: "POST" } }),
   );
 
+  // The manifest declares this route `auth: "delegated"`, so in the cloud
+  // the gateway has already refused a request without a valid delegation
+  // token. `verifyDelegation` checks the token again, because the app is
+  // about to forward it, and on the local surface admits a loopback caller
+  // that passes the local guard. The 401 tells an MCP client to refresh or
+  // sign in again (authoring guide §7b).
   app.post("/mcp", async (c) => {
-    const auth = await authenticateMcpRequest(c.req.raw);
-    if (!auth.ok) return auth.response;
-    return mcpHandler(c.req.raw, { context: auth.context });
+    const principal = await verifyDelegation(c.req.raw);
+    if (!principal) return delegationRefusal(c.req.raw);
+    return mcpHandler(c.req.raw, { principal });
   });
-
-  // Same paths the Vercel functions use, so the MCP screen is unchanged
-  // apart from its BASE_URL-relative path.
-  app.all("/api/mcp-login", (c) => handleMcpLogin(c.req.raw));
-  app.all("/api/mcp-sessions", (c) => handleMcpSessions(c.req.raw));
 
   const runtimeConfig = createRuntimeConfigHandler();
   app.get("/starkeep-runtime-config", () => runtimeConfig());

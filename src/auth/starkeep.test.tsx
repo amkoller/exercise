@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { AuthProvider, useAuth } from "./AuthContext";
 import Login from "./Login";
@@ -87,15 +87,6 @@ test("AuthContext fails closed when the session probe and the runtime config bot
   expect(await screen.findByText("signed out")).toBeInTheDocument();
 });
 
-test("MCPLogin asks to sign in again when the app server answers 401", async () => {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) }));
-
-  render(<MCPLogin />);
-  fireEvent.click(screen.getByRole("button", { name: /generate token/i }));
-
-  expect(await screen.findByText(/session has expired/i)).toBeInTheDocument();
-});
-
 test("Login renders the Starkeep sign-in action and no email form", () => {
   render(<Login />);
   expect(screen.getByRole("button", { name: /sign in with starkeep/i })).toBeInTheDocument();
@@ -103,63 +94,51 @@ test("Login renders the Starkeep sign-in action and no email form", () => {
   expect(screen.queryByRole("button", { name: /magic link/i })).not.toBeInTheDocument();
 });
 
-test("MCPLogin calls the BASE_URL-relative endpoints and renders the token and its expiry", async () => {
+const GATEWAY = "https://gw.example.com";
+
+test("MCPLogin in the cloud shows the endpoint and the platform's connect and connections pages", async () => {
   const fetchMock = vi.fn(async (url: string) => {
-    if (url === "/apps/exercise/api/mcp-sessions") {
-      return { ok: true, json: async () => ({ sessions: [] }) };
+    if (url === "/apps/exercise/starkeep-runtime-config") {
+      return { ok: true, json: async () => ({ apiGatewayUrl: `${GATEWAY}/`, userPoolId: "us-east-1_abc" }) };
     }
-    return {
-      ok: true,
-      json: async () => ({ token: "exr_opaque", expires_at: "2026-12-07T00:00:00.000Z" }),
-    };
+    return { ok: false, status: 404, json: async () => ({}) };
   });
   vi.stubGlobal("fetch", fetchMock);
 
   render(<MCPLogin />);
-  await waitFor(() =>
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/apps/exercise/api/mcp-sessions",
-      expect.objectContaining({ method: "POST", body: "{}" }),
-    ),
-  );
 
-  fireEvent.click(screen.getByRole("button", { name: /generate token/i }));
-
-  expect(await screen.findByDisplayValue("exr_opaque")).toBeInTheDocument();
-  expect(fetchMock).toHaveBeenCalledWith(
-    "/apps/exercise/api/mcp-login",
-    expect.objectContaining({ method: "POST", body: "{}" }),
+  const endpoint = `${window.location.origin}/apps/exercise/mcp`;
+  expect(screen.getByDisplayValue(endpoint)).toBeInTheDocument();
+  // OAuth: the client is added with no header and signs in on the platform.
+  expect((screen.getByLabelText("Claude Code CLI") as HTMLTextAreaElement).value).toBe(
+    `claude mcp add --transport http exercise ${endpoint}`,
   );
-  expect(
-    screen.getByText(`Expires ${new Date("2026-12-07T00:00:00.000Z").toLocaleString()}`),
-  ).toBeInTheDocument();
-  expect(screen.getByDisplayValue(`${window.location.origin}/apps/exercise/mcp`)).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "Create a token" })).toHaveAttribute(
+    "href",
+    `${GATEWAY}/connect?app=exercise`,
+  );
+  expect(screen.getByRole("link", { name: "Manage connections" })).toHaveAttribute("href", `${GATEWAY}/connections`);
+  expect((screen.getByLabelText("Claude Code CLI with a token") as HTMLTextAreaElement).value).toContain(
+    'Authorization: Bearer YOUR_TOKEN',
+  );
+  // Exercise no longer mints or lists tokens itself.
+  expect(screen.queryByRole("button", { name: /generate/i })).not.toBeInTheDocument();
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/apps/exercise/starkeep-runtime-config"]);
 });
 
-test("MCPLogin revokes through the BASE_URL-relative sessions endpoint", async () => {
-  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-    if (init?.method === "DELETE") return { ok: true, json: async () => ({ ok: true }) };
-    return {
-      ok: true,
-      json: async () => ({
-        sessions: [{ id: "s1", createdAt: "2026-11-01T00:00:00Z", lastUsedAt: "2026-11-02T00:00:00Z" }],
-      }),
-    };
-  });
-  vi.stubGlobal("fetch", fetchMock);
+test("MCPLogin on the local surface says no token is needed and links to no platform page", async () => {
+  vi.stubEnv("BASE_URL", "/");
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
 
   render(<MCPLogin />);
-  fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
 
-  await waitFor(() => expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument());
-  expect(fetchMock).toHaveBeenCalledWith(
-    "/apps/exercise/api/mcp-sessions",
-    expect.objectContaining({ method: "DELETE", body: JSON.stringify({ session_id: "s1" }) }),
-  );
+  expect(await screen.findByText(/needs no token/i)).toBeInTheDocument();
+  expect(screen.getByDisplayValue(`${window.location.origin}/mcp`)).toBeInTheDocument();
+  expect(screen.queryByRole("link")).not.toBeInTheDocument();
 });
 
 test("nothing on the Starkeep path imports @supabase/supabase-js", async () => {
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ signedIn: true, token: "t", sessions: [] }) }));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ signedIn: true, apiGatewayUrl: GATEWAY }) }));
 
   render(
     <AuthProvider>
@@ -169,8 +148,7 @@ test("nothing on the Starkeep path imports @supabase/supabase-js", async () => {
     </AuthProvider>,
   );
   await screen.findByText(/signed in/);
-  fireEvent.click(screen.getByRole("button", { name: /generate token/i }));
-  await screen.findByDisplayValue("t");
+  await screen.findByRole("link", { name: "Manage connections" });
 
   expect(supabaseFactory).not.toHaveBeenCalled();
 });

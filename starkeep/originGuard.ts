@@ -18,12 +18,23 @@
  *
  * Cloud mode (`STARKEEP_APP_CLIENT_MODE=cloud`) is a no-op: API Gateway and
  * Starkeep's session/JWT authorizers guard that surface. `/mcp` is not under
- * `/api/*` and is not gated: it is authenticated by bearer token, and MCP
- * clients may send any `Origin` or none.
+ * `/api/*` and is not gated here: `verifyDelegation` makes the platform's
+ * local checks for it.
  */
 
 import type { MiddlewareHandler } from "hono";
-import { isCloudMode, isJsonRequest } from "./caller.js";
+
+function isCloudMode(): boolean {
+  return process.env.STARKEEP_APP_CLIENT_MODE === "cloud";
+}
+
+/**
+ * A cross-site HTML form or `no-cors` fetch cannot send `application/json`
+ * without a CORS preflight this server never answers.
+ */
+function isJsonRequest(req: Request): boolean {
+  return (req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json");
+}
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 // PUT too: the browser never sends it, and `/api/local-data/*` forwards every
