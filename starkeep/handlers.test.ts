@@ -103,7 +103,6 @@ const { buildUuidRideFixtures } = (await import(/* @vite-ignore */ RIDE_FIXTURES
     };
   };
 };
-const { asPgTimestamptz } = await import("./analysis.js");
 const { default: supabaseHandler } = await import("../api/mcp.js");
 
 // ---- scenario -----------------------------------------------------------------
@@ -714,12 +713,6 @@ describe("read tools: same text as api/mcp.ts's RPCs", () => {
     expect(r.isError).toBe(true);
     expect(text(r)).toBe("training_gaps failed: Starkeep row API 500 on sessions: boom");
   });
-
-  it("asPgTimestamptz formats like PostgREST", () => {
-    expect(asPgTimestamptz("2026-08-01T00:00:00.000Z")).toBe("2026-08-01T00:00:00+00:00");
-    expect(asPgTimestamptz("2026-08-01T00:00:00.120Z")).toBe("2026-08-01T00:00:00.12+00:00");
-    expect(asPgTimestamptz("2026-08-01")).toBe("2026-08-01");
-  });
 });
 
 // ---- exercises ----------------------------------------------------------------
@@ -1192,6 +1185,26 @@ describe("cloud mode", () => {
     const appReads = dataRequests.filter((r) => r.path.startsWith("/app-data/db/exercises"));
     expect(appReads).toHaveLength(2);
     expect(appReads.map((r) => r.delegation).sort()).toEqual([a.token, b.token].sort());
+  });
+
+  it("two users' concurrent analysis reads each see only their own rows", async () => {
+    const a = userWith("user-a", "A Press");
+    const b = userWith("user-b", "B Row");
+    a.store.tables.workout_days = [
+      { id: D1, name: "A Day", position: 0, program_id: null, program_position: null, created_at: TS("08-01"), archived_at: null },
+    ];
+    b.store.tables.workout_days = [
+      { id: D2, name: "B Day", position: 0, program_id: null, program_position: null, created_at: TS("08-01"), archived_at: null },
+    ];
+
+    const [ra, rb] = await Promise.all([
+      callStarkeep("get_day_templates", undefined, a.token),
+      callStarkeep("get_day_templates", undefined, b.token),
+    ]);
+    expect((JSON.parse(text(ra)) as { workout_day_name: string }[]).map((d) => d.workout_day_name)).toEqual(["A Day"]);
+    expect((JSON.parse(text(rb)) as { workout_day_name: string }[]).map((d) => d.workout_day_name)).toEqual(["B Day"]);
+    const loads = dataRequests.filter((r) => r.path.startsWith("/app-data/db/workout_days"));
+    expect(loads.map((r) => r.delegation).sort()).toEqual([a.token, b.token].sort());
   });
 });
 
