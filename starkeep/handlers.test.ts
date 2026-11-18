@@ -7,7 +7,7 @@
  *
  * Real: the Hono app, the local `verifyDelegation` check,
  * `createServerTransport` → `signedFetch`, the Starkeep DataLayer and row
- * client, `starkeep/handlers.ts`, the analysis functions. Stubbed: the app
+ * client, `starkeep/handlers.ts`, the analysis SQL over a snapshot. Stubbed: the app
  * credential, the cloud `verifyDelegation` (the platform's token check, which
  * core tests), and the data server (global `fetch`): every app table goes to
  * `createFakeTransport` over the manifest's tables, one per delegated user so
@@ -18,7 +18,7 @@
  * asserts the expected text and that both backends return it byte for byte.
  * For the RPC-backed read tools the fake RPC answers with what Postgres
  * returns for the scenario, written out by hand below (not computed by the
- * analysis functions under test).
+ * analysis SQL under test).
  *
  * The seven ride tools (AI-654) run on the ride fixtures
  * (`src/analysis/rides/testFixtures.ts`), written to Starkeep through the
@@ -103,7 +103,7 @@ const { buildUuidRideFixtures } = (await import(/* @vite-ignore */ RIDE_FIXTURES
     };
   };
 };
-const { asPgTimestamptz } = await import("./handlers.js");
+const { asPgTimestamptz } = await import("./analysis.js");
 const { default: supabaseHandler } = await import("../api/mcp.js");
 
 // ---- scenario -----------------------------------------------------------------
@@ -658,12 +658,19 @@ describe("read tools: same text as api/mcp.ts's RPCs", () => {
     expect(text(r)).toContain('"workout_day_name": "Old Legs"');
   });
 
-  it("get_workout_history bounds the session read by the date range", async () => {
-    await callStarkeep("get_workout_history", { start_date: "2026-08-24", end_date: "2026-08-26" });
-    const sessionsRead = dataRequests.find((r) => r.path.startsWith("/app-data/db/sessions"))!;
-    expect(new URL(sessionsRead.path, "http://x").searchParams.get("where")).toBe(
-      JSON.stringify({ performed_on: { gte: "2026-08-24", lte: "2026-08-26" } }),
-    );
+  it("a read sees a write made just before it", async () => {
+    const before = JSON.parse(text(await callStarkeep("get_day_templates"))) as { workout_day_name: string }[];
+    expect(before.map((d) => d.workout_day_name)).not.toContain("Arms");
+    const created = await callStarkeep("create_day_template", { name: "Arms" });
+    expect(created.isError).toBeUndefined();
+    const after = JSON.parse(text(await callStarkeep("get_day_templates"))) as { workout_day_name: string }[];
+    expect(after.map((d) => d.workout_day_name)).toContain("Arms");
+  });
+
+  it("get_workout_history refuses a start_date that is not a date, as Postgres does", async () => {
+    const r = await callStarkeep("get_workout_history", { start_date: "yesterday" });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toBe('get_workout_history failed: invalid input syntax for type date: "yesterday"');
   });
 
   it("get_workout_history with no arguments object at all (defaulted to {}, as api/mcp.ts does)", async () => {

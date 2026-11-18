@@ -23,6 +23,7 @@ import { withDefaultToolArguments } from "../src/mcp/defaults.js";
 import { registerTools, type McpToolHandlers } from "../src/mcp/handlers.js";
 import { toolError } from "../src/mcp/format.js";
 import { TOOL_DEFINITIONS } from "../src/mcp/tools.js";
+import { createAnalysisReads } from "./analysis.js";
 import { createStarkeepHandlers } from "./handlers.js";
 import { createServerTransport } from "./serverTransport.js";
 
@@ -58,7 +59,8 @@ export function createRequestHandlers(deps: ExerciseMcpDeps): McpToolHandlers {
   // forwards principal.token, so the platform applies the delegation's mode
   // and revocation to every call. Locally the token is null.
   const transport = createServerTransport({ delegation: principal.token });
-  return createStarkeepHandlers(createStarkeepDataLayer(transport), createRowClient(transport));
+  const rows = createRowClient(transport);
+  return createStarkeepHandlers(createStarkeepDataLayer(transport), rows, createAnalysisReads(rows));
 }
 
 export function createExerciseMcpServer(deps: ExerciseMcpDeps = {}): McpServer {

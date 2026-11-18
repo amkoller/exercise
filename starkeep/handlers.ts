@@ -5,11 +5,9 @@
  * validation, same lookups in the same order, same error texts, same output
  * shapes, all formatted with `src/mcp/format.ts` so the text is identical.
  *
- * - Read tools fetch rows through the row client, bounded by the tool's
- *   parameters, and compute with the matching `src/analysis/` function (the
- *   TypeScript ports of the Supabase RPCs). Archived rows are fetched too and
- *   `archived_at` is passed as the analysis row's `deleted_at`, so each
- *   function applies its own soft-delete rule.
+ * - The eight strength read tools run the Supabase RPCs' own SQL, ported to
+ *   SQLite in `./analysisSql.ts`, over a snapshot of the caller's rows
+ *   (`./analysis.ts`).
  * - Write tools use the Starkeep DataLayer, plus row-client reads for the raw
  *   checks `api/mcp.ts` does against Postgres (live-row lookups by id,
  *   duplicate link, attachment, current membership).
@@ -26,7 +24,7 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { DataLayer } from "../src/data/DataLayer.js";
-import { ExerciseInUseError, selectIn } from "../src/data/starkeep.js";
+import { ExerciseInUseError } from "../src/data/starkeep.js";
 import type { Row, RowClient, Where } from "../src/data/starkeep/rows.js";
 import type { McpToolHandlers } from "../src/mcp/handlers.js";
 import {
@@ -39,25 +37,7 @@ import {
   validateSets,
   validateWeight,
 } from "../src/mcp/format.js";
-import {
-  adherenceForDay,
-  getDayTemplates,
-  getWorkoutHistory,
-  progressionForExercise,
-  schemeHistoryForDayExercise,
-  setsForExercise,
-  trainingGaps,
-  weeklyVolume,
-  type ExerciseRow,
-  type JsonValue,
-  type ProgramRow,
-  type SchemeHistoryRow,
-  type SessionRow,
-  type SessionSetRow,
-  type WorkoutDayExerciseRow,
-  type WorkoutDayRow,
-} from "../src/analysis/index.js";
-import { compileIlike } from "../src/analysis/sqlSemantics.js";
+import type { AnalysisReads } from "./analysis.js";
 import { createRideToolHandlers } from "../src/analysis/rides/index.js";
 import { DEFAULT_ATHLETE_TIMEZONE } from "../src/metrics/dates.js";
 
@@ -110,129 +90,6 @@ interface SkLink extends Row {
   target_sets: string | null;
 }
 
-interface SkHistory extends Row {
-  id: string;
-  workout_day_id: string;
-  exercise_id: string;
-  target_sets: string | null;
-  recorded_at: string;
-}
-
-interface SkSession extends Row {
-  id: string;
-  workout_day_id: string | null;
-  performed_on: string;
-  created_at: string;
-}
-
-interface SkSet extends Row {
-  id: string;
-  session_id: string;
-  exercise_id: string;
-  set_number: number;
-  weight: number;
-  reps: number;
-}
-
-// ---- Starkeep row → analysis row (Supabase column names) --------------------
-
-/**
- * Postgres `jsonb` does not keep the key order it was given: it stores (and
- * PostgREST prints) an object's keys shortest first, then bytewise. So a
- * scheme written as `{"weight":100,"reps":5}` comes back from the Supabase
- * RPCs as `{"reps":5,"weight":100}`. Re-key parsed JSON the same way so the
- * tool text is identical.
- */
-function asJsonb(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(asJsonb);
-  if (value === null || typeof value !== "object") return value;
-  const byte = (k: string) => Buffer.from(k, "utf8");
-  const keys = Object.keys(value).sort((a, b) => {
-    const x = byte(a);
-    const y = byte(b);
-    return x.length - y.length || Buffer.compare(x, y);
-  });
-  return Object.fromEntries(keys.map((k) => [k, asJsonb(value[k]!)]));
-}
-
-/** `target_sets` is JSON text in Starkeep and parsed `jsonb` in the analysis rows. */
-function parseJson(raw: string | null | undefined): JsonValue {
-  return raw === null || raw === undefined ? null : asJsonb(JSON.parse(raw) as JsonValue);
-}
-
-const toExerciseRow = (r: SkExercise): ExerciseRow => ({
-  id: r.id,
-  name: r.name,
-  cue: r.cue,
-  default_sets: r.default_sets,
-  default_rep_low: r.default_rep_low,
-  default_rep_high: r.default_rep_high,
-  created_at: r.created_at,
-  deleted_at: r.archived_at ?? null,
-});
-
-const toProgramRow = (r: SkProgram): ProgramRow => ({
-  id: r.id,
-  name: r.name,
-  created_at: r.created_at,
-  deleted_at: r.archived_at ?? null,
-});
-
-const toDayRow = (r: SkDay): WorkoutDayRow => ({
-  id: r.id,
-  name: r.name,
-  position: r.position,
-  created_at: r.created_at,
-  deleted_at: r.archived_at ?? null,
-  program_id: r.program_id ?? null,
-  program_position: r.program_position ?? null,
-});
-
-const toLinkRow = (r: SkLink): WorkoutDayExerciseRow => ({
-  id: r.id,
-  workout_day_id: r.workout_day_id,
-  exercise_id: r.exercise_id,
-  position: r.position,
-  target_sets: parseJson(r.target_sets),
-});
-
-/**
- * A Starkeep timestamp (`toISOString()`: `2026-08-01T00:00:00.000Z`) as
- * PostgREST prints a `timestamptz` in Supabase's UTC session:
- * `2026-08-01T00:00:00+00:00`, fractional seconds only when non-zero and
- * without trailing zeros (`…:00.12+00:00`). Anything else passes through.
- */
-export function asPgTimestamptz(ts: string): string {
-  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/.exec(ts);
-  if (!m) return ts;
-  const fraction = (m[2] ?? "").replace(/0+$/, "");
-  return `${m[1]}${fraction ? `.${fraction}` : ""}+00:00`;
-}
-
-const toHistoryRow = (r: SkHistory): SchemeHistoryRow => ({
-  id: r.id,
-  workout_day_id: r.workout_day_id,
-  exercise_id: r.exercise_id,
-  target_sets: parseJson(r.target_sets),
-  recorded_at: asPgTimestamptz(r.recorded_at),
-});
-
-const toSessionRow = (r: SkSession): SessionRow => ({
-  id: r.id,
-  workout_day_id: r.workout_day_id ?? null,
-  performed_on: r.performed_on,
-  created_at: r.created_at,
-});
-
-const toSetRow = (r: SkSet): SessionSetRow => ({
-  id: r.id,
-  session_id: r.session_id,
-  exercise_id: r.exercise_id,
-  set_number: r.set_number,
-  weight: Number(r.weight),
-  reps: r.reps,
-});
-
 // ---- helpers ------------------------------------------------------------------
 
 /**
@@ -255,14 +112,11 @@ function assertUuid(value: string): void {
   if (!UUID_PATTERN.test(value)) throw new Error(`invalid input syntax for type uuid: "${value}"`);
 }
 
-/** A canonical `YYYY-MM-DD`, safe to compare as text against `sessions.performed_on`. */
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : ((e as { message?: string })?.message ?? String(e));
 }
 
-export function createStarkeepHandlers(data: DataLayer, rows: RowClient): McpToolHandlers {
+export function createStarkeepHandlers(data: DataLayer, rows: RowClient, analysis: AnalysisReads): McpToolHandlers {
   async function firstRow<R extends Row>(table: string, where: Where, select?: string[]): Promise<R | null> {
     const { rows: found } = await rows.select<R>(table, { where, select, limit: 1 });
     return found[0] ?? null;
@@ -304,147 +158,46 @@ export function createStarkeepHandlers(data: DataLayer, rows: RowClient): McpToo
     }
   }
 
-  /**
-   * progression_for_exercise / sets_for_exercise: the sets of every exercise
-   * whose name matches `%exercise_name%` under ILIKE (archived exercises
-   * included, as the SQL does not filter them), and those sets' sessions.
-   * The match uses the analysis functions' own ILIKE compiler, so a pattern
-   * Postgres rejects is rejected here with the same message.
-   */
-  async function setsForName(exerciseName: string) {
-    const pattern = compileIlike(`%${exerciseName}%`);
-    const exercises = await rows.selectAll<SkExercise>(T.exercises, { select: ["id", "name"] });
-    const matching = exercises.filter((e) => pattern.test(e.name)).map((e) => e.id);
-    const sets = (await selectIn<SkSet>(rows, T.sets, "exercise_id", matching)).map(toSetRow);
-    const sessions = (
-      await selectIn<SkSession>(rows, T.sessions, "id", sets.map((s) => s.session_id), { select: ["id", "performed_on"] })
-    ).map((s) => ({ id: s.id, performed_on: s.performed_on }));
-    return { exercises: exercises.map((e) => ({ id: e.id, name: e.name })), sessions, sessionSets: sets };
-  }
-
-  /** `performed_on` bounds for the row API, when they are plain dates. The analysis applies them again. */
-  function dateWhere(startDate: string | undefined, endDate: string | undefined): Where {
-    const range: { gte?: string; lte?: string } = {};
-    if (startDate !== undefined && ISO_DATE.test(startDate)) range.gte = startDate;
-    if (endDate !== undefined && ISO_DATE.test(endDate)) range.lte = endDate;
-    return Object.keys(range).length ? { performed_on: range } : {};
-  }
-
   return {
     // The seven ride analytics read tools, shared with api/mcp.ts (src/analysis/rides).
     // Starkeep has no env: the same default zone the Supabase server falls back to.
     ...createRideToolHandlers((run) => run(data), { defaultTimeZone: DEFAULT_ATHLETE_TIMEZONE }),
     progression_for_exercise: ({ exercise_name }) =>
-      readTool("progression_for_exercise", async () =>
-        progressionForExercise(await setsForName(exercise_name), { exercise_name }),
-      ),
+      readTool("progression_for_exercise", () => analysis.progressionForExercise(exercise_name)),
 
     sets_for_exercise: ({ exercise_name }) =>
-      readTool("sets_for_exercise", async () => setsForExercise(await setsForName(exercise_name), { exercise_name })),
+      readTool("sets_for_exercise", () => analysis.setsForExercise(exercise_name)),
 
-    weekly_volume: () =>
-      readTool("weekly_volume", async () => {
-        const [sessions, sets] = await Promise.all([
-          rows.selectAll<SkSession>(T.sessions, { select: ["id", "performed_on"] }),
-          rows.selectAll<SkSet>(T.sets, { select: ["session_id", "weight", "reps"] }),
-        ]);
-        return weeklyVolume({
-          sessions: sessions.map((s) => ({ id: s.id, performed_on: s.performed_on })),
-          sessionSets: sets.map((s) => ({ session_id: s.session_id, weight: Number(s.weight), reps: s.reps })),
-        });
-      }),
+    weekly_volume: () => readTool("weekly_volume", () => analysis.weeklyVolume()),
 
-    training_gaps: () =>
-      readTool("training_gaps", async () => {
-        const sessions = await rows.selectAll<SkSession>(T.sessions, { select: ["performed_on"] });
-        return trainingGaps({ sessions: sessions.map((s) => ({ performed_on: s.performed_on })) });
-      }),
+    training_gaps: () => readTool("training_gaps", () => analysis.trainingGaps()),
 
-    get_day_templates: () =>
-      readTool("get_day_templates", async () => {
-        // Archived days and programs included: getDayTemplates drops them itself.
-        // Ordered so rows the SQL leaves unordered (tied positions) come out stably.
-        const [days, programs, links, exercises, sessions, sets] = await Promise.all([
-          rows.selectAll<SkDay>(T.days, { order: ["position.asc", "created_at.asc"] }),
-          rows.selectAll<SkProgram>(T.programs),
-          rows.selectAll<SkLink>(T.links, { order: ["position.asc"] }),
-          rows.selectAll<SkExercise>(T.exercises),
-          rows.selectAll<SkSession>(T.sessions, { select: ["id", "workout_day_id"] }),
-          rows.selectAll<SkSet>(T.sets, { select: ["session_id"] }),
-        ]);
-        return getDayTemplates({
-          workoutDays: days.map(toDayRow),
-          programs: programs.map(toProgramRow),
-          workoutDayExercises: links.map(toLinkRow),
-          exercises: exercises.map(toExerciseRow),
-          sessions: sessions.map((s) => ({ id: s.id, workout_day_id: s.workout_day_id ?? null })),
-          sessionSets: sets.map((s) => ({ session_id: s.session_id })),
-        });
-      }),
+    get_day_templates: () => readTool("get_day_templates", () => analysis.getDayTemplates()),
 
     get_workout_history: ({ start_date, end_date, exercise_name }) =>
-      readTool("get_workout_history", async () => {
-        const sessions = (
-          await rows.selectAll<SkSession>(T.sessions, { where: dateWhere(start_date, end_date) })
-        ).map(toSessionRow);
-        const sets = (await selectIn<SkSet>(rows, T.sets, "session_id", sessions.map((s) => s.id))).map(toSetRow);
-        // Archived days included: the SQL joins them unfiltered, so a session
-        // keeps its day's name after the day is deleted.
-        const [days, exercises] = await Promise.all([
-          selectIn<SkDay>(rows, T.days, "id", sessions.map((s) => s.workout_day_id), { select: ["id", "name"] }),
-          selectIn<SkExercise>(rows, T.exercises, "id", sets.map((s) => s.exercise_id), { select: ["id", "name"] }),
-        ]);
-        return getWorkoutHistory(
-          {
-            sessions,
-            workoutDays: days.map((d) => ({ id: d.id, name: d.name })),
-            sessionSets: sets,
-            exercises: exercises.map((e) => ({ id: e.id, name: e.name })),
-          },
-          { start_date: start_date ?? null, end_date: end_date ?? null, exercise_name: exercise_name ?? null },
-        );
-      }),
+      readTool("get_workout_history", () =>
+        analysis.getWorkoutHistory({
+          startDate: start_date ?? null,
+          endDate: end_date ?? null,
+          exerciseName: exercise_name ?? null,
+        }),
+      ),
 
     scheme_history_for_day_exercise: ({ workout_day_id, exercise_id }) =>
       readTool("scheme_history_for_day_exercise", async () => {
         assertUuid(workout_day_id);
         assertUuid(exercise_id);
-        const history = await rows.selectAll<SkHistory>(T.history, {
-          where: { workout_day_id: key(workout_day_id), exercise_id: key(exercise_id) },
-          order: ["recorded_at.asc"],
-        });
-        return schemeHistoryForDayExercise({ schemeHistory: history.map(toHistoryRow) }, { workout_day_id, exercise_id });
+        return analysis.schemeHistoryForDayExercise(key(workout_day_id), key(exercise_id));
       }),
 
     adherence_for_day: ({ workout_day_id, start_date, end_date }) =>
       readTool("adherence_for_day", async () => {
         if (workout_day_id !== undefined) assertUuid(workout_day_id);
-        const where: Where = { ...dateWhere(start_date, end_date) };
-        if (workout_day_id !== undefined) where.workout_day_id = key(workout_day_id);
-        const sessions = (await rows.selectAll<SkSession>(T.sessions, { where })).map(toSessionRow);
-        const dayIds = sessions.map((s) => s.workout_day_id);
-        // Archived days included, as for get_workout_history. History in
-        // recorded_at order (then id, which the row API appends), as
-        // scheme_history_for_day_exercise reads it; a (day, exercise) pair
-        // never spans two `in` chunks, so that order holds per pair.
-        const [sets, days, links, history] = await Promise.all([
-          selectIn<SkSet>(rows, T.sets, "session_id", sessions.map((s) => s.id)).then((r) => r.map(toSetRow)),
-          selectIn<SkDay>(rows, T.days, "id", dayIds, { select: ["id", "name"] }),
-          selectIn<SkLink>(rows, T.links, "workout_day_id", dayIds),
-          selectIn<SkHistory>(rows, T.history, "workout_day_id", dayIds, { order: ["recorded_at.asc"] }),
-        ]);
-        const exercises = await selectIn<SkExercise>(rows, T.exercises, "id", sets.map((s) => s.exercise_id));
-        return adherenceForDay(
-          {
-            sessions,
-            sessionSets: sets,
-            workoutDays: days.map((d) => ({ id: d.id, name: d.name })),
-            exercises: exercises.map(toExerciseRow),
-            workoutDayExercises: links.map(toLinkRow),
-            schemeHistory: history.map(toHistoryRow),
-          },
-          { for_workout_day_id: workout_day_id ?? null, start_date: start_date ?? null, end_date: end_date ?? null },
-        );
+        return analysis.adherenceForDay({
+          workoutDayId: workout_day_id === undefined ? null : key(workout_day_id),
+          startDate: start_date ?? null,
+          endDate: end_date ?? null,
+        });
       }),
 
     create_day_template: ({ name, program_id }) =>

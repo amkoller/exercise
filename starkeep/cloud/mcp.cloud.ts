@@ -101,6 +101,20 @@ describe.skipIf(!run.enabled)("Exercise /mcp on a cloud test stack", () => {
     expect(await exerciseNames(run.delegationTokens.readwrite)).not.toContain(name);
   });
 
+  it("answers an analysis read in SQL over a snapshot of the delegated user's rows", async () => {
+    const name = `Cloud Day ${randomUUID().slice(0, 8)}`;
+    const created = await callTool("create_day_template", { name }, run.delegationTokens.readwrite);
+    expect(created.isError, created.content[0]?.text).toBeUndefined();
+
+    // The snapshot loads through the read delegation, in the app's Lambda.
+    const templates = await callTool("get_day_templates", {}, run.delegationTokens.read);
+    expect(templates.isError, templates.content[0]?.text).toBeUndefined();
+    const days = JSON.parse(templates.content[0]!.text) as { workout_day_name: string; is_available: unknown }[];
+    const day = days.find((d) => d.workout_day_name === name);
+    expect(day).toBeDefined();
+    expect(day!.is_available).toBe(true);
+  });
+
   it("answers a token the deployment did not sign with 401", async () => {
     const res = await post({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }, "skd_not-a-real-token");
     expect(res.status).toBe(401);

@@ -106,7 +106,7 @@ There are three ways to run the app for real. Pick one.
 
 | Path | What it holds |
 | --- | --- |
-| `src/` | The single-page app: screens, data layers (mock, Supabase, Starkeep), the shared MCP tool definitions in `src/mcp/`, and the analysis logic in `src/analysis/`. |
+| `src/` | The single-page app: screens, data layers (mock, Supabase, Starkeep), the shared MCP tool definitions in `src/mcp/`, and the ride analysis in `src/analysis/rides/`. |
 | `api/` | Vercel serverless functions: the MCP server (`api/mcp.ts`) and the token endpoints. |
 | `starkeep/` | The Starkeep server, its MCP server (`starkeep/mcp.ts`), the Lambda handler and the bundle script. |
 | `supabase/` | SQL migrations, applied to production from `main` by CI. |
@@ -115,10 +115,12 @@ There are three ways to run the app for real. Pick one.
 | `CLAUDE.md`, `AGENTS.md`, `.claude/` | Instructions for AI coding agents working on this repo. |
 | `LICENSE` | MIT. |
 
-The analysis behind the read tools (progression, volume, gaps, adherence) is
-plain TypeScript in `src/analysis/`. It replaced SQL functions, and its tests
-check it against the semantics of that SQL. The ride tools share one
-implementation in `src/analysis/rides/`, over the ride maths in `src/metrics/`.
+The strength read tools (progression, volume, gaps, adherence) run SQL on
+both deployments. On Supabase they call the RPC functions in
+`supabase/migrations/`. On Starkeep they run the same statements, ported to
+SQLite in `starkeep/analysisSql.ts`, over a snapshot of the user's rows. The
+ride tools share one implementation in `src/analysis/rides/`, over the ride
+maths in `src/metrics/`.
 
 ## Development
 

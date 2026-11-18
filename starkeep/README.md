@@ -23,6 +23,9 @@ tools pinned in `src/mcp/__fixtures__/tools-list.main.json`.
 | `starkeep/server.ts` | The Hono app (`app.fetch`) both surfaces run: `POST /mcp`, `GET /starkeep-runtime-config`, `/api/session[/*]`, `/api/local-data/*`. |
 | `starkeep/mcp.ts` | `createExerciseMcpServer(deps)`, serving the 32 tools pinned in `src/mcp/__fixtures__/tools-list.main.json`, and the stateless JSON transport per request. `deps.principal` is who the request acts for, as `verifyDelegation` returned it. |
 | `starkeep/originGuard.ts` | Local-mode gate on `/api/*`: 403 for a non-loopback `Origin`, 415 for a non-JSON `POST`/`PATCH`/`DELETE`. |
+| `starkeep/handlers.ts` | The Starkeep implementation of the 32 tools, with the same text as `api/mcp.ts`. |
+| `starkeep/analysisSql.ts` | The eight strength analysis reads: each Supabase RPC's SQL, ported to SQLite. See [Analysis reads in SQL](#analysis-reads-in-sql). |
+| `starkeep/analysis.ts` | Runs those statements over a snapshot of the caller's rows and prints the results as PostgREST does. |
 | `starkeep/serverTransport.ts` | `createServerTransport({ delegation? })`: server-side `Transport` to the app's tables over `signedFetch`, forwarding the delegation token when given. |
 | `starkeep/cloud/` | `npm run test:cloud`: `/mcp` on a throwaway AWS test stack. See [Cloud test](#cloud-test). |
 | `scripts/link-core-harness.mjs` | Links starkeep-core's unpublished test harnesses into `node_modules/@starkeep/` before `test:cloud`. Copied unchanged from core's example app. |
@@ -273,6 +276,35 @@ never SSE. The class is `WebStandardStreamableHTTPServerTransport`. It is the
 web-`Request` version of `StreamableHTTPServerTransport`, which only wraps it
 for Node `req`/`res`. Hono hands the app a web `Request`.
 
+## Analysis reads in SQL
+
+The eight strength read tools (`progression_for_exercise`,
+`sets_for_exercise`, `weekly_volume`, `training_gaps`, `get_day_templates`,
+`get_workout_history`, `scheme_history_for_day_exercise` and
+`adherence_for_day`) run the same SQL as the Supabase RPCs that `api/mcp.ts`
+calls. `starkeep/analysisSql.ts` holds each RPC's body, copied from its
+migration and changed only where SQLite or Starkeep's tables differ. Its
+comments list each change. Change an RPC and its copy together. The parity
+tests in `starkeep/handlers.test.ts` compare the tool text of both backends.
+
+Each read loads the tables its statement names through the request's row
+client into an in-memory SQLite (`createSnapshotCache` from
+`@starkeep/app-client/snapshot`), runs the statement and drops the copy. The
+row client forwards the delegation token, so the data plane decides whose
+rows load. Nothing is cached between reads, so a read always sees the
+client's earlier writes. Exercise does not use `createSnapshotSql`, because
+that helper authenticates a browser session and `/mcp` callers carry a
+delegation token.
+
+The port differs from Postgres in three places:
+
+- SQLite's `like` folds case for ASCII letters only, where `ilike` folds all
+  of Unicode.
+- `adherence_for_day` sorts exercise names with `collate nocase`, which can
+  order punctuation and spaces differently from `en_US`.
+- A scheme with fractional reps is truncated, where Postgres refuses it. The
+  app and the tools write only whole reps.
+
 ## Cloud test
 
 `npm run test:cloud` checks `/mcp` on a real Starkeep cloud, using
@@ -295,6 +327,8 @@ checks:
 - The `readwrite` token lists the 32 tools, creates an exercise, and reads it
   back.
 - The `read` token reads, and the platform refuses its write.
+- `get_day_templates` under the `read` token sees a day the `readwrite`
+  token created, which runs the analysis SQL in the app's Lambda.
 - A token the deployment did not sign gets 401.
 
 The suite does not drive an OAuth sign-in: that flow is the platform's, and
@@ -344,7 +378,7 @@ or a composite key gain a text `id` (see [Ride analytics tables](#ride-analytics
 `programs`, `workout_days` and `exercises` maps to a nullable `archived_at`
 `timestamp` that the app owns. The app archives a row by writing
 `archived_at` (ISO-8601 UTC) and restores it by writing `null`. Archived rows
-stay readable, which the analysis functions need (workout history keeps
+stay readable, which the analysis reads need (workout history keeps
 deleted days). Reads must filter `archived_at` themselves, e.g.
 `where={"archived_at":{"is":null}}` for live rows; nothing filters them for
 you.
@@ -422,8 +456,9 @@ text, blob, timestamp, boolean`):
 Supabase rules the DataLayer has to reproduce by hand: the partial unique
 index `workout_days (program_id, program_position) where program_id is not
 null and deleted_at is null` (here: `archived_at is null`); the append-only rule on
-`workout_day_exercise_scheme_history`, which is insert only; and the RPCs
-(`get_day_templates`, `get_workout_history`, `adherence_for_day`, `progression_for_exercise`, `scheme_history_for_day_exercise`, `sets_for_exercise`, `training_gaps` and `weekly_volume`). Indexes are listed under
+`workout_day_exercise_scheme_history`, which is insert only. The RPCs run as
+SQLite over a snapshot instead (see
+[Analysis reads in SQL](#analysis-reads-in-sql)). Indexes are listed under
 [Indexes](#indexes).
 
 ### Ride analytics tables
