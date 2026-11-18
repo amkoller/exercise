@@ -88,7 +88,10 @@ export function asPgTimestamptz(ts: string): string {
  */
 function assertDate(value: string | null): void {
   if (value === null) return;
-  const valid = /^\d{4}-\d{2}-\d{2}$/.test(value) && new Date(`${value}T00:00:00Z`).toISOString().startsWith(value);
+  // A day past the month's end parses as a later date, and a day past 31 or a
+  // month past 12 does not parse at all. Either way it is not this date.
+  const ms = /^\d{4}-\d{2}-\d{2}$/.test(value) ? Date.parse(`${value}T00:00:00Z`) : NaN;
+  const valid = !Number.isNaN(ms) && new Date(ms).toISOString().startsWith(value);
   if (!valid) throw new Error(`invalid input syntax for type date: "${value}"`);
 }
 

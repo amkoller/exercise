@@ -258,6 +258,12 @@ describe("get_workout_history (0011_workout_history_filters.sql)", () => {
     await expect(analysis.getWorkoutHistory({ ...all, endDate: "today" })).rejects.toThrow(
       'invalid input syntax for type date: "today"',
     );
+    await expect(analysis.getWorkoutHistory({ ...all, startDate: "2026-02-32" })).rejects.toThrow(
+      'invalid input syntax for type date: "2026-02-32"',
+    );
+    await expect(analysis.getWorkoutHistory({ ...all, endDate: "2026-13-01" })).rejects.toThrow(
+      'invalid input syntax for type date: "2026-13-01"',
+    );
   });
 
   it("filters by a case-insensitive literal substring, dropping rows without an exercise", async () => {
